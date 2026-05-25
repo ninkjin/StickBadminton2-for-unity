@@ -1,0 +1,36 @@
+# Unity
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+.consulo/
+.csproj
+.sln
+*.csproj
+*.sln
+
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.pidb
+*.booproj
+*.svd
+
+# JetBrains Rider
+.idea/
+*.sln.iml
+
+# VS Code
+.vscode/
+
+# Auto-generated Unity meta files should be tracked
+# But ignore specific Unity folders
+[Aa]ssets/[Ss]creenshots/
+
+# OS
+.DS_Store
+Thumbs.db
