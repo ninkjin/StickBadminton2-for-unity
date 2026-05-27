@@ -11,8 +11,6 @@ public class GameManager : MonoBehaviour
 
     [Header("Serve Settings")]
     public Vector3 defaultServePos = new Vector3(-3f, 1f, 0f);
-    public float serveSpeedX = 6f;
-    public float serveSpeedY = 9f;
 
     [Header("Score")]
     public int leftScore = 0;
@@ -22,6 +20,7 @@ public class GameManager : MonoBehaviour
     [Header("State")]
     public GameState state = GameState.WaitingToServe;
     public string server = "Left";
+    public static bool forceUnderhandOnly = false;
 
     private float stateTimer = 0f;
     private bool gameEnded = false;
@@ -31,22 +30,45 @@ public class GameManager : MonoBehaviour
         if (shuttlecock != null)
         {
             shuttlecock.OnLanded += OnShuttlecockLanded;
-            shuttlecock.ResetTo(defaultServePos);
         }
         if (player != null)
+        {
             player.transform.position = new Vector3(defaultServePos.x, player.transform.position.y, player.transform.position.z);
-        state = GameState.WaitingToServe;
+            player.SetShuttlecock(shuttlecock);
+        }
+        if (opponent != null)
+        {
+            opponent.SetShuttlecock(shuttlecock);
+        }
+        SetupServe();
     }
 
     void Update()
     {
-        if (gameEnded) return;
+        // 调试快捷键
+        if (Input.GetKeyDown(KeyCode.F1))
+            DebugServeLeft();
+        if (Input.GetKeyDown(KeyCode.F2))
+            DebugServeRight();
+        if (Input.GetKeyDown(KeyCode.F3))
+            forceUnderhandOnly = !forceUnderhandOnly;
+
+        if (gameEnded)
+        {
+            if (Input.GetKeyDown(KeyCode.R))
+                RestartGame();
+            return;
+        }
 
         switch (state)
         {
             case GameState.WaitingToServe:
-                if (Input.GetKeyDown(KeyCode.S) || Input.GetKeyDown(KeyCode.Space))
-                    ServeShuttlecock();
+                // Player presses S to serve (handled in BattleCharacter.HandleSwingInput)
+                // If server is AI, trigger serve
+                if (server == "Right" && opponent != null && opponent.serving)
+                {
+                    // AI handles serve automatically via its UpdateAI
+                }
                 break;
 
             case GameState.PointScored:
@@ -57,24 +79,18 @@ public class GameManager : MonoBehaviour
         }
     }
 
-    void ServeShuttlecock()
+    void SetupServe()
     {
-        if (shuttlecock == null) return;
-
-        Vector3 servePos = server == "Left"
-            ? defaultServePos
-            : new Vector3(-defaultServePos.x, defaultServePos.y, defaultServePos.z);
-        float dir = server == "Left" ? 1f : -1f;
-
-        shuttlecock.ResetTo(servePos);
-        shuttlecock.Serve(dir, serveSpeedX, serveSpeedY);
-
         if (server == "Left" && player != null)
-            player.PlayServeAnimation();
+        {
+            player.SetupServe();
+            player.serving = true;
+        }
         else if (server == "Right" && opponent != null)
-            opponent.PlayServeAnimation();
-
-        state = GameState.Playing;
+        {
+            opponent.SetupServe();
+            opponent.serving = true;
+        }
     }
 
     void OnShuttlecockLanded(string scorer)
@@ -97,10 +113,7 @@ public class GameManager : MonoBehaviour
     {
         if (gameEnded) return;
 
-        Vector3 pos = server == "Left"
-            ? defaultServePos
-            : new Vector3(-defaultServePos.x, defaultServePos.y, defaultServePos.z);
-        shuttlecock.ResetTo(pos);
+        SetupServe();
         state = GameState.WaitingToServe;
     }
 
@@ -119,8 +132,60 @@ public class GameManager : MonoBehaviour
         rightScore = 0;
         gameEnded = false;
         server = "Left";
-        shuttlecock.ResetTo(defaultServePos);
         state = GameState.WaitingToServe;
+    }
+
+    // Called by BattleCharacter when player serves
+    public void OnPlayerServe()
+    {
+        state = GameState.Playing;
+    }
+
+    // Called by AIController when AI serves
+    public void OnOpponentServe()
+    {
+        state = GameState.Playing;
+    }
+
+    [ContextMenu("调试：左边发球")]
+    public void DebugServeLeft()
+    {
+        server = "Left";
+        ForceResetToServe();
+    }
+
+    [ContextMenu("调试：右边发球")]
+    public void DebugServeRight()
+    {
+        server = "Right";
+        ForceResetToServe();
+    }
+
+    void ForceResetToServe()
+    {
+        state = GameState.WaitingToServe;
+        stateTimer = 0f;
+
+        if (shuttlecock != null)
+        {
+            shuttlecock.isInPlay = false;
+            shuttlecock.dx = 0f;
+            shuttlecock.dy = 0f;
+            shuttlecock.speed = 0f;
+        }
+
+        if (player != null)
+        {
+            player.DebugResetState();
+            player.transform.position = new Vector3(defaultServePos.x, player.transform.position.y, player.transform.position.z);
+        }
+        if (opponent != null)
+        {
+            opponent.DebugResetState();
+            opponent.transform.position = new Vector3(-defaultServePos.x, opponent.transform.position.y, opponent.transform.position.z);
+        }
+
+        SetupServe();
     }
 
     void OnGUI()
@@ -135,13 +200,16 @@ public class GameManager : MonoBehaviour
         style.fontSize = 24;
         string stateText = "";
         if (state == GameState.WaitingToServe)
-            stateText = "按 S 发球";
+            stateText = server == "Left" ? "按 S 发球" : "对手发球中...";
         else if (state == GameState.GameOver)
             stateText = $"游戏结束！{(leftScore >= winScore ? "左边" : "右边")}获胜！按R重新开始";
 
         GUI.Label(new Rect(0, 70, Screen.width, 40), stateText, style);
 
-        if (state == GameState.GameOver && Input.GetKeyDown(KeyCode.R))
-            RestartGame();
+        if (forceUnderhandOnly)
+        {
+            style.normal.textColor = Color.yellow;
+            GUI.Label(new Rect(0, 110, Screen.width, 40), "[F3] 仅反手模式", style);
+        }
     }
 }
