@@ -6,6 +6,7 @@ public class NetworkActionButton : MonoBehaviour
 {
     public enum Action { CreateRoom, JoinRoom, StopRoom }
     public Action action = Action.CreateRoom;
+    public InputField ipInput;
 
     void Awake()
     {
@@ -23,7 +24,13 @@ public class NetworkActionButton : MonoBehaviour
         switch (action)
         {
             case Action.CreateRoom: MultiplayerManager.Instance.CreateRoom(); break;
-            case Action.JoinRoom: MultiplayerManager.Instance.JoinRoom(); break;
+            case Action.JoinRoom:
+                string ip = (ipInput != null && !string.IsNullOrEmpty(ipInput.text.Trim())) ? ipInput.text.Trim() : null;
+                if (string.IsNullOrEmpty(ip))
+                    MultiplayerManager.Instance.StartDiscoveryAndJoin();
+                else
+                    MultiplayerManager.Instance.JoinRoom(ip);
+                break;
             case Action.StopRoom: MultiplayerManager.Instance.StopNetwork(); break;
         }
     }

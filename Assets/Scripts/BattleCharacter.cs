@@ -822,7 +822,7 @@ public class BattleCharacter : MonoBehaviour
     {
         var sync = NetworkBattleSync.Instance;
         if (sync == null || !sync.Received) return;
-        transform.position = sync.RemotePos;
+        transform.position = Vector2.Lerp(transform.position, sync.RemotePos, Time.deltaTime * 20f);
         facing = sync.RemoteFacing;
         Vector3 scale = transform.localScale;
         scale.x = Mathf.Abs(scale.x) * facing;
@@ -913,15 +913,16 @@ public class BattleCharacter : MonoBehaviour
 
     void DrawGripGizmo(Transform marker, float midAngleRad, Color color, string label)
     {
+#if UNITY_EDITOR
         if (marker == null) return;
         Vector3 g = marker.position;
         UnityEditor.Handles.color = color;
         UnityEditor.Handles.DrawWireDisc(g, Vector3.forward, 0.18f);
         UnityEditor.Handles.Label(g + Vector3.up * 0.25f, label);
-        // Draw racket reach line at mid-swing angle
         UnityEditor.Handles.color = new Color(color.r, color.g, color.b, 0.4f);
         Vector3 head = g + new Vector3(-Mathf.Sin(midAngleRad), Mathf.Cos(midAngleRad), 0) * racketLength;
         UnityEditor.Handles.DrawLine(g, head);
         UnityEditor.Handles.DrawWireDisc(head, Vector3.forward, 0.08f);
+#endif
     }
 }

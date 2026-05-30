@@ -29,6 +29,8 @@ public class GameManager : MonoBehaviour
 
     void Start()
     {
+        Application.targetFrameRate = 60;
+
         if (shuttlecock != null)
         {
             shuttlecock.OnLanded += OnShuttlecockLanded;
@@ -174,7 +176,6 @@ public class GameManager : MonoBehaviour
         rightScore = right;
         server = newServer;
 
-        // 比分重置（0-0）时清理游戏结束状态
         if (left == 0 && right == 0)
         {
             gameEnded = false;
@@ -182,7 +183,6 @@ public class GameManager : MonoBehaviour
             perfectVictory = false;
         }
 
-        // 确保球停止（非权威端可能还在飞行）
         if (shuttlecock != null)
         {
             shuttlecock.isInPlay = false;

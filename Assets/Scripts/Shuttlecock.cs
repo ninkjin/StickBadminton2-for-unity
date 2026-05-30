@@ -88,15 +88,13 @@ public class Shuttlecock : MonoBehaviour
         {
             newX = wallRightX;
             dx *= -wallBounceDx;
-            if (Mathf.Abs(dx) < wallMinDx)
-                dx = wallMinDx * Mathf.Sign(dx);
+            if (dx > -wallMinDx) dx = -wallMinDx;
         }
         if (newX < wallLeftX)
         {
             newX = wallLeftX;
             dx *= -wallBounceDx;
-            if (Mathf.Abs(dx) < wallMinDx)
-                dx = wallMinDx * Mathf.Sign(dx);
+            if (dx < wallMinDx) dx = wallMinDx;
         }
 
         // Ceiling bounce
@@ -134,7 +132,7 @@ public class Shuttlecock : MonoBehaviour
         // 飞行拖尾：速度越快拖尾越密（原版逻辑）
         if (isInPlay && speed > 5f)
         {
-            float trailChance = speed / 80f;
+            float trailChance = speed / 80f * Time.deltaTime * 60f;
             if (Random.value < trailChance)
             {
                 FeatherTrail.Spawn(transform.position);
