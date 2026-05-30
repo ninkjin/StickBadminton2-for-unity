@@ -18,13 +18,19 @@ public class Shuttlecock : MonoBehaviour
     [Header("Boundaries")]
     public float groundY = -4.5f;
     public float ceilingY = 5f;
+    public float wallLeftX = -5f;
+    public float wallRightX = 5f;
+
+    [Header("Net")]
     public float netX = 0f;
-    public float wallLeftX = -13f;
-    public float wallRightX = 13f;
+    public float netTopY = 0.5f;
+    public float netBottomY = -4.5f;
+    public float netHalfWidth = 0.08f;
 
     [Header("State")]
     public bool isInPlay = false;
     public string lastHitter = "";
+    [HideInInspector] public bool hasScored = false;
 
     [Header("Visual")]
     public Transform visual;
@@ -38,7 +44,6 @@ public class Shuttlecock : MonoBehaviour
 
     private Vector3 startPosition;
     private CircleCollider2D col;
-    private float netLeftX, netRightX, netTopY, netBottomY;
 
     public System.Action<string> OnLanded;
 
@@ -53,22 +58,10 @@ public class Shuttlecock : MonoBehaviour
             var found = transform.Find("Visual");
             if (found != null) visual = found;
         }
-
-        // Find net boundaries
-        var net = GameObject.FindGameObjectWithTag("Net");
-        if (net != null)
-        {
-            var netCol = net.GetComponent<BoxCollider2D>();
-            if (netCol != null)
-            {
-                Bounds b = netCol.bounds;
-                netLeftX = b.min.x;
-                netRightX = b.max.x;
-                netTopY = b.max.y;
-                netBottomY = b.min.y;
-            }
-        }
     }
+
+    float NetLeftX { get { return netX - netHalfWidth; } }
+    float NetRightX { get { return netX + netHalfWidth; } }
 
     void Update()
     {
@@ -116,7 +109,7 @@ public class Shuttlecock : MonoBehaviour
 
         // Net collision (top of net — ball going downward hits top edge)
         float oldX = transform.position.x;
-        if (dy < 0 && oldX > netLeftX && oldX < netRightX
+        if (dy < 0 && oldX > NetLeftX && oldX < NetRightX
             && newY <= netTopY && transform.position.y >= netTopY)
         {
             newY = netTopY;
@@ -128,15 +121,26 @@ public class Shuttlecock : MonoBehaviour
         }
         // Net body collision (side of net)
         else if (newY < netTopY && newY > netBottomY
-            && ((oldX <= netLeftX && newX > netLeftX) || (oldX >= netRightX && newX < netRightX)))
+            && ((oldX <= NetLeftX && newX > NetLeftX) || (oldX >= NetRightX && newX < NetRightX)))
         {
-            if (dx > 0) newX = netLeftX;
-            else newX = netRightX;
+            if (dx > 0) newX = NetLeftX;
+            else newX = NetRightX;
             dx *= -netBounceDx;
             dy *= netBounceDy;
         }
 
         transform.position = new Vector3(newX, newY, transform.position.z);
+
+        // 飞行拖尾：速度越快拖尾越密（原版逻辑）
+        if (isInPlay && speed > 5f)
+        {
+            float trailChance = speed / 80f;
+            if (Random.value < trailChance)
+            {
+                FeatherTrail.Spawn(transform.position);
+                FeatherTrail.Spawn(transform.position);
+            }
+        }
 
         // Update polar coordinates for visual
         if (Mathf.Abs(dx) > 0.01f || Mathf.Abs(dy) > 0.01f)
@@ -149,13 +153,25 @@ public class Shuttlecock : MonoBehaviour
         if (visual != null && speed > 1f)
             visual.rotation = Quaternion.Euler(0, 0, dir);
 
-        // Ground hit
+        // Ground hit（触地即得分，反弹仅视觉效果）
         if (transform.position.y <= groundY)
         {
             transform.position = new Vector3(transform.position.x, groundY, transform.position.z);
-            dy *= -groundBounceDy;
-            if (Mathf.Abs(dy) < 0.3f) dy = 0f;
-            Land();
+            if (!hasScored)
+            {
+                hasScored = true;
+                Land(); // 得分
+                dy *= -groundBounceDy;
+            }
+            else if (Mathf.Abs(dy) < 0.3f)
+            {
+                dy = 0f;
+                isInPlay = false;
+            }
+            else
+            {
+                dy *= -groundBounceDy;
+            }
         }
 
         Physics2D.SyncTransforms();
@@ -167,6 +183,7 @@ public class Shuttlecock : MonoBehaviour
         dx = speedX * directionX;
         dy = speedY;
         isInPlay = true;
+        hasScored = false;
         lastHitter = "";
         RecalculatePolar();
     }
@@ -181,6 +198,10 @@ public class Shuttlecock : MonoBehaviour
         dy = Mathf.Sin(rad) * speed;
 
         isInPlay = true;
+        hasScored = false;
+
+        HitSpark.Burst(transform.position, 8);
+        SoundManager.PlaySFX("birdiehit");
 
         estimatedLandingX = SimulateLandingX();
         lastHitter = "";
@@ -219,7 +240,7 @@ public class Shuttlecock : MonoBehaviour
             if (simX < wallLeftX) { simX = wallLeftX; simDx *= -wallBounceDx; }
 
             // Net top bounce
-            if (simDy < 0 && simX > netLeftX && simX < netRightX && simY < netTopY)
+            if (simDy < 0 && simX > NetLeftX && simX < NetRightX && simY < netTopY)
             {
                 simY = netTopY;
                 simDy *= -netTopDy;
@@ -268,21 +289,32 @@ public class Shuttlecock : MonoBehaviour
         Gizmos.DrawLine(new Vector3(wallLeftX, groundY, 0), new Vector3(wallRightX, groundY, 0));
         UnityEditor.Handles.Label(new Vector3(wallLeftX, groundY - 0.3f, 0), "地面 groundY");
 
-        // 左墙
-        Gizmos.color = Color.gray;
+        // 左墙（羽毛球反弹边界）
+        Gizmos.color = Color.magenta;
         Gizmos.DrawLine(new Vector3(wallLeftX, groundY, 0), new Vector3(wallLeftX, ceilingY, 0));
+        UnityEditor.Handles.Label(new Vector3(wallLeftX, groundY - 0.3f, 0), $"墙 WallLeft={wallLeftX}");
 
-        // 右墙
+        // 右墙（羽毛球反弹边界）
+        Gizmos.color = Color.magenta;
         Gizmos.DrawLine(new Vector3(wallRightX, groundY, 0), new Vector3(wallRightX, ceilingY, 0));
+        UnityEditor.Handles.Label(new Vector3(wallRightX, groundY - 0.3f, 0), $"墙 WallRight={wallRightX}");
 
         // 天花板线
         Gizmos.color = Color.cyan;
         Gizmos.DrawLine(new Vector3(wallLeftX, ceilingY, 0), new Vector3(wallRightX, ceilingY, 0));
         UnityEditor.Handles.Label(new Vector3(wallLeftX, ceilingY + 0.15f, 0), "天花板 ceilingY");
 
-        // 网
-        Gizmos.color = Color.blue;
-        Gizmos.DrawLine(new Vector3(netX, groundY, 0), new Vector3(netX, ceilingY, 0));
+        // 网（矩形 + 标签）
+        Gizmos.color = new Color(0.3f, 0.5f, 1f, 0.7f);
+        Vector3 netTL = new Vector3(NetLeftX, netTopY, 0);
+        Vector3 netTR = new Vector3(NetRightX, netTopY, 0);
+        Vector3 netBL = new Vector3(NetLeftX, netBottomY, 0);
+        Vector3 netBR = new Vector3(NetRightX, netBottomY, 0);
+        Gizmos.DrawLine(netTL, netTR);
+        Gizmos.DrawLine(netTR, netBR);
+        Gizmos.DrawLine(netBR, netBL);
+        Gizmos.DrawLine(netBL, netTL);
+        UnityEditor.Handles.Label(new Vector3(netX, netTopY + 0.15f, 0), $"网顶={netTopY}");
 
         // 预测落点（运行时可见）
         if (Application.isPlaying && isInPlay)

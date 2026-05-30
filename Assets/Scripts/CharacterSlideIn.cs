@@ -23,39 +23,152 @@ public class CharacterSlideIn : MonoBehaviour
     private int selectCount = 0;
     private GameObject leftCharObj;
     private GameObject rightCharObj;
+    private Sprite leftPortrait;
+    private Sprite rightPortrait;
     private bool isAnimating = false;
+    private bool isNetworkMode = false;
+    private int myNetworkSlot = -1; // 0=左, 1=右
 
-    public bool CanSlide { get { return selectCount < 2 && !isAnimating; } }
+    public bool CanSlide { get { return selectCount < (isNetworkMode ? 1 : 2) && !isAnimating; } }
     public int SelectedCount { get { return selectCount; } }
+    public Sprite LeftPortrait { get { return leftPortrait; } }
+    public Sprite RightPortrait { get { return rightPortrait; } }
 
-    public void TrySelect(Sprite sprite)
+    void Start()
     {
-        if (sprite == null || selectCount >= 2 || isAnimating) return;
+        isNetworkMode = MultiplayerManager.Instance != null && MultiplayerManager.Instance.IsConnected();
+        if (isNetworkMode)
+        {
+            myNetworkSlot = MultiplayerManager.Instance.IsHost ? 0 : 1;
+            var lobby = NetworkLobbySync.Instance;
+            if (lobby != null)
+            {
+                lobby.OnSelectionChanged += OnNetworkSelectionChanged;
+            }
+        }
+    }
+
+    void OnDestroy()
+    {
+        if (isNetworkMode && NetworkLobbySync.Instance != null)
+            NetworkLobbySync.Instance.OnSelectionChanged -= OnNetworkSelectionChanged;
+    }
+
+    void OnNetworkSelectionChanged()
+    {
+        var lobby = NetworkLobbySync.Instance;
+        if (lobby == null) return;
+
+        int opp = lobby.GetOpponentSelection();
+        int my = lobby.GetMySelection();
+
+        // 显示我的选择
+        if (my >= 0 && my < characterSprites.Length)
+        {
+            if (myNetworkSlot == 0 && leftCharObj == null)
+            {
+                leftCharObj = CreateCharImage("LeftChar", characterSprites[my]);
+                StartCoroutine(SlideToPosition(leftCharObj, leftEntryMarker, leftTargetMarker));
+                selectCount++;
+            }
+            else if (myNetworkSlot == 1 && rightCharObj == null)
+            {
+                rightCharObj = CreateCharImage("RightChar", characterSprites[my]);
+                StartCoroutine(SlideToPosition(rightCharObj, rightEntryMarker, rightTargetMarker));
+                selectCount++;
+            }
+        }
+
+        // 显示对手的选择 + 保存对手头像（从 CharButtonSelect 按钮读取）
+        if (opp >= 0 && opp < characterSprites.Length)
+        {
+            Sprite oppPortrait = GetPortraitForIndex(opp);
+
+            if (myNetworkSlot == 0 && rightCharObj == null)
+            {
+                rightCharObj = CreateCharImage("RightChar", characterSprites[opp]);
+                CharacterSelection.RightSprite = oppPortrait;
+                StartCoroutine(SlideToPosition(rightCharObj, rightEntryMarker, rightTargetMarker));
+            }
+            else if (myNetworkSlot == 1 && leftCharObj == null)
+            {
+                leftCharObj = CreateCharImage("LeftChar", characterSprites[opp]);
+                CharacterSelection.LeftSprite = oppPortrait;
+                StartCoroutine(SlideToPosition(leftCharObj, leftEntryMarker, leftTargetMarker));
+            }
+        }
+    }
+
+    Sprite GetPortraitForIndex(int idx)
+    {
+        var buttons = FindObjectsOfType<CharButtonSelect>();
+        foreach (var btn in buttons)
+        {
+            int btnIdx = System.Array.IndexOf(characterSprites, btn.characterSprite);
+            if (btnIdx == idx) return btn.portraitSprite;
+        }
+        return characterSprites[idx]; // fallback
+    }
+
+    public void TrySelect(Sprite displaySprite, Sprite portrait)
+    {
+        if (displaySprite == null || selectCount >= 2 || isAnimating) return;
+
+        if (isNetworkMode)
+        {
+            TrySelectNetwork(displaySprite, portrait);
+            return;
+        }
 
         if (selectCount == 0)
         {
-            leftCharObj = CreateCharImage("LeftChar", sprite);
+            leftCharObj = CreateCharImage("LeftChar", displaySprite);
+            leftPortrait = portrait;
             StartCoroutine(SlideToPosition(leftCharObj, leftEntryMarker, leftTargetMarker));
         }
         else if (selectCount == 1)
         {
-            rightCharObj = CreateCharImage("RightChar", sprite);
+            rightCharObj = CreateCharImage("RightChar", displaySprite);
+            rightPortrait = portrait;
             StartCoroutine(SlideToPosition(rightCharObj, rightEntryMarker, rightTargetMarker));
         }
-
         selectCount++;
+    }
+
+    void TrySelectNetwork(Sprite displaySprite, Sprite portrait)
+    {
+        var lobby = NetworkLobbySync.Instance;
+        if (lobby == null) return;
+        if (!lobby.IsMyTurn()) return;
+
+        int spriteIndex = System.Array.IndexOf(characterSprites, displaySprite);
+        if (spriteIndex < 0) return;
+
+        // 保存 portrait 给战斗场景
+        if (myNetworkSlot == 0)
+        {
+            leftPortrait = portrait;
+            CharacterSelection.LeftSprite = portrait;
+        }
+        else
+        {
+            rightPortrait = portrait;
+            CharacterSelection.RightSprite = portrait;
+        }
+
+        lobby.SelectCharacter(spriteIndex);
     }
 
     public void Undo()
     {
         if (isAnimating) return;
 
-        if (selectCount == 2 && rightCharObj != null)
+        if (selectCount == 2 && rightCharObj != null && !isNetworkMode)
         {
             selectCount--;
             StartCoroutine(SlideOutAndDestroy(rightCharObj, rightTargetMarker, rightEntryMarker, false));
         }
-        else if (selectCount == 1 && leftCharObj != null)
+        else if (selectCount == 1 && leftCharObj != null && !isNetworkMode)
         {
             selectCount--;
             StartCoroutine(SlideOutAndDestroy(leftCharObj, leftTargetMarker, leftEntryMarker, true));

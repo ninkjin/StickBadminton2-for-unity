@@ -55,6 +55,8 @@ public class AIController : MonoBehaviour
     public float racketAngleEnd = -40f;    // 正手挥拍晚期
     public float racketAngleStartBackhand = 30f;   // 反手挥拍早期（逆时针）
     public float racketAngleEndBackhand = 210f;    // 反手挥拍晚期（逆时针）
+    public float backhandShotAngleStart = 70f;     // 反手挥拍早期出球角度
+    public float backhandShotAngleEnd = 15f;       // 反手挥拍晚期出球角度
 
     [Header("碰撞")]
     public Vector2 colliderSize = new Vector2(0.8f, 1.5f);
@@ -62,10 +64,21 @@ public class AIController : MonoBehaviour
 
     [Header("控制模式")]
     public bool humanControlled = true;
+    public bool aiControlled = false;
+
+    [Header("AI 参数")]
+    public float aiReactDistance = 3f;
+    public float aiSwingCooldown = 0.3f;
+    public float aiIdlePositionX = 3f;
+    [Range(0f, 1f)] public float aiSkillLevel = 0.75f;
+    public float aiReactDelay = 0.15f;
 
     [Header("引用")]
     public Shuttlecock shuttlecock;
     public GameManager gameManager;
+
+    [HideInInspector] public bool isNetworkRemote = false;
+    [HideInInspector] public bool isNetworkHost = false;
 
     private enum CharState { Idle, Walking, Jumping, Swinging, Serving, Recovering }
     private CharState state = CharState.Idle;
@@ -96,12 +109,23 @@ public class AIController : MonoBehaviour
     private Transform gripUnderhandMarker;
     private Transform serveMarker;
 
+    // AI state
+    private float aiLastSwingTime = -10f;
+    private float aiServeReadyTime = 0f;
+    private bool aiServeStarted = false;
+    private float aiPlayerHitTime = -10f;
+    private float aiSwingCommitted = -10f;
+    private bool aiWasHit = false;
+    private float aiTargetX = 3f;
+    private float aiCachedError = 0f;
+
     private bool serveRecovering = false;
     private int serveRecoveryFrameIndex = 0;
     private float serveRecoveryFrameTimer = 0f;
     private bool serveHitApplied = false;
     private bool holdingSwing = false;
     private bool swingIsMiss = false;
+    private Vector3 idleOverlayLocalPos;
 
     void Awake()
     {
@@ -163,11 +187,19 @@ public class AIController : MonoBehaviour
             sr.sprite = idleFrames[0];
         else if (walkLeftFrames != null && walkLeftFrames.Length > 0)
             sr.sprite = walkLeftFrames[0];
+
+        idleOverlayLocalPos = swingRenderer.transform.localPosition;
     }
 
     void Update()
     {
         if (!Application.isPlaying) return;
+        if (isNetworkRemote)
+        {
+            ApplyRemoteState();
+            UpdateRemoteVisuals();
+            return;
+        }
 
         float dt = Time.deltaTime;
 
@@ -219,13 +251,18 @@ public class AIController : MonoBehaviour
             }
         }
 
-        // Movement input (always, except during serve/recovery animation)
+        // Movement + Swing input
         if (state != CharState.Serving && state != CharState.Recovering)
-            HandleMovement();
-
-        // Swing input (only when not already swinging/serving/recovering)
-        if (state != CharState.Swinging && state != CharState.Serving && state != CharState.Recovering)
-            HandleSwingInput();
+        {
+            if (aiControlled)
+                UpdateAI(state != CharState.Swinging);
+            else
+            {
+                HandleMovement();
+                if (state != CharState.Swinging)
+                    HandleSwingInput();
+            }
+        }
 
         // Walk animation
         if (state != CharState.Swinging && state != CharState.Serving && state != CharState.Recovering)
@@ -240,24 +277,193 @@ public class AIController : MonoBehaviour
             UpdateServeRecovery();
     }
 
+    void UpdateAI(bool canSwing)
+    {
+        if (shuttlecock == null) return;
+
+        Vector3 birdPos = shuttlecock.transform.position;
+        float myX = transform.position.x;
+        float myY = transform.position.y;
+        bool birdInPlay = shuttlecock.isInPlay;
+
+        // --- 追踪谁打了球 ---
+        bool iHitIt = birdInPlay && shuttlecock.lastHitter == name;
+        bool opponentHitIt = birdInPlay && !string.IsNullOrEmpty(shuttlecock.lastHitter) && shuttlecock.lastHitter != name;
+
+        if (iHitIt && !aiWasHit)
+        {
+            Debug.Log($"[AI] 我击球了, 回防0.8s");
+            aiWasHit = true;
+        }
+        else if (opponentHitIt && aiWasHit)
+        {
+            // 对手刚击球 → 记录时间，延迟后再缓存目标（等落点稳定）
+            Debug.Log($"[AI] 对手击球, 等待落点稳定...");
+            aiPlayerHitTime = Time.time;
+            aiTargetX = -999f; // 标记需要重新缓存
+            aiCachedError = (1f - aiSkillLevel) * Random.Range(-1f, 1f);
+            aiWasHit = false;
+        }
+        else if (opponentHitIt && !aiWasHit && aiPlayerHitTime < 0)
+        {
+            // 初始状态 → 也走正常延迟流程
+            Debug.Log($"[AI] 初始状态, 等待落点稳定...");
+            aiPlayerHitTime = Time.time;
+            aiTargetX = -999f;
+            aiCachedError = (1f - aiSkillLevel) * Random.Range(-1f, 1f);
+        }
+
+        // --- 发球 ---
+        if (serving && !birdInPlay)
+        {
+            if (!aiServeStarted)
+            {
+                aiServeReadyTime = Time.time + 0.8f;
+                aiServeStarted = true;
+            }
+            if (Time.time >= aiServeReadyTime && canSwing)
+            {
+                SwingMe();
+                aiServeStarted = false;
+                aiLastSwingTime = Time.time;
+                aiSwingCommitted = Time.time;
+            }
+            return;
+        }
+        if (!serving)
+            aiServeStarted = false;
+
+        // --- 移动策略 ---
+        float targetX = aiIdlePositionX;
+
+        if (birdInPlay)
+        {
+            if (aiWasHit && Time.time - aiSwingCommitted < 0.8f)
+            {
+                targetX = aiIdlePositionX;
+            }
+            else if (Time.time - aiPlayerHitTime > aiReactDelay * (1f - aiSkillLevel * 0.5f))
+            {
+                // 反应延迟过后 → 缓存目标位置，并持续跟踪落点变化（弹墙/天花板后调整）
+                float newTarget = Mathf.Clamp(shuttlecock.estimatedLandingX + aiCachedError, moveMinX + 0.5f, moveMaxX - 0.5f);
+                if (aiTargetX < -99f || Mathf.Abs(newTarget - aiTargetX) > 1.5f)
+                {
+                    aiTargetX = newTarget;
+                }
+                targetX = aiTargetX;
+            }
+        }
+        else
+        {
+            aiTargetX = -999f; // 重置，下次重新缓存
+        }
+
+        // 平滑移动（不要瞬间跳变）
+        float diff = targetX - myX;
+        float moveThreshold = aiWasHit ? 0.5f : 0.2f;
+        if (Mathf.Abs(diff) > moveThreshold)
+        {
+            float spd = moveSpeed * moveModifier;
+            if (aiWasHit) spd *= 0.6f;
+            // 目标远时加速（追靠墙球）
+            if (Mathf.Abs(diff) > 2f) spd *= 1.4f;
+            float moveX = Mathf.Sign(diff) * spd * Time.deltaTime;
+            moveX = Mathf.Clamp(moveX, -Mathf.Abs(diff), Mathf.Abs(diff));
+
+            Vector3 pos = transform.position;
+            Vector2 checkH = new Vector2(pos.x + moveX, pos.y);
+            Collider2D hitH = Physics2D.OverlapBox(checkH, colliderSize, 0f, wallLayer);
+            if (hitH == null)
+            {
+                pos.x += moveX;
+                pos.x = Mathf.Clamp(pos.x, moveMinX, moveMaxX);
+                transform.position = pos;
+                isWalking = true;
+            }
+        }
+        else
+        {
+            isWalking = false;
+        }
+
+        // --- 跳跃 ---
+        if (birdInPlay && canSwing && state != CharState.Jumping
+            && !aiWasHit) // 刚打完球不跳（避免连跳）
+        {
+            bool ballHigh = birdPos.y > myY + hitZoneOffset.y;
+            bool ballClose = Mathf.Abs(birdPos.x - myX) < aiReactDistance * 1.5f;
+            bool ballApproaching = (facing == -1 && shuttlecock.dx < -1f) || (facing == 1 && shuttlecock.dx > 1f);
+
+            if (ballHigh && ballClose && ballApproaching)
+            {
+                if (!isGrounded && !doubleJumped)
+                {
+                    doubleJumped = true;
+                    dy = jumpSpeed * jumpModifier;
+                    state = CharState.Jumping;
+                }
+                else if (isGrounded)
+                {
+                    dy = jumpSpeed * jumpModifier;
+                    isGrounded = false;
+                    state = CharState.Jumping;
+                }
+            }
+        }
+
+        // --- 挥拍 ---
+        if (canSwing && birdInPlay
+            && Time.time - aiLastSwingTime > aiSwingCooldown
+            && !aiWasHit) // 刚打完球不能马上再挥（防止连挥bug）
+        {
+            // 球在反弹中且很低 → 不挥（防止地弹球无限连挥）
+            bool ballBouncing = birdPos.y < myY - 1f && shuttlecock.dy > -3f;
+            if (ballBouncing) goto skipSwing;
+
+            float dist = Vector2.Distance(
+                new Vector2(birdPos.x, birdPos.y),
+                new Vector2(myX, myY + hitZoneOffset.y));
+            bool ballInFront = (facing == -1 && birdPos.x < myX + 0.5f)
+                            || (facing == 1 && birdPos.x > myX - 0.5f);
+            float effectiveDist = ballInFront ? aiReactDistance : aiReactDistance * 0.5f;
+
+            if (dist < effectiveDist)
+            {
+                aiLastSwingTime = Time.time;
+                aiSwingCommitted = Time.time;
+                SwingMe();
+            }
+        }
+        skipSwing:
+
+        // Always face opponent
+        Vector3 scale = transform.localScale;
+        scale.x = Mathf.Abs(scale.x) * facing;
+        transform.localScale = scale;
+        UpdateSwingOverlayFlip();
+
+        if (isGrounded && !isWalking && state == CharState.Jumping)
+            state = CharState.Idle;
+    }
+
     void HandleMovement()
     {
         isWalking = false;
         float moveX = 0f;
 
-        if (Input.GetKey(KeyCode.RightArrow))
+        if (MobileInput.MoveRight() || Input.GetKey(KeyCode.RightArrow))
         {
             moveX = moveSpeed * moveModifier * Time.deltaTime;
             if (isGrounded) isWalking = true;
         }
-        else if (Input.GetKey(KeyCode.LeftArrow))
+        else if (MobileInput.MoveLeft() || Input.GetKey(KeyCode.LeftArrow))
         {
             moveX = -moveSpeed * moveModifier * Time.deltaTime;
             if (isGrounded) isWalking = true;
         }
 
         // Jump: UpArrow, with double jump
-        bool jumpPressed = Input.GetKey(KeyCode.UpArrow);
+        bool jumpPressed = MobileInput.JumpDown() || Input.GetKey(KeyCode.UpArrow);
         if (jumpPressed && !jumpKeyReady)
         {
             // Key was already down, don't re-trigger
@@ -308,7 +514,7 @@ public class AIController : MonoBehaviour
 
     void HandleSwingInput()
     {
-        bool swingKeyDown = Input.GetKey(KeyCode.DownArrow);
+        bool swingKeyDown = MobileInput.Swing() || Input.GetKey(KeyCode.DownArrow);
 
         if (swingKeyDown && !holdingSwing)
         {
@@ -321,9 +527,14 @@ public class AIController : MonoBehaviour
         }
     }
 
-    void SwingMe()
+    public void SwingMe()
     {
         if (state == CharState.Swinging || state == CharState.Serving) return;
+
+        // 立即发送挥拍事件（不经节流）
+        var sync = NetworkBattleSync.Instance;
+        if (sync != null && !isNetworkRemote)
+            sync.SendSwingEvent(serving);
 
         // Serving: start serve swing animation
         if (serving)
@@ -364,6 +575,7 @@ public class AIController : MonoBehaviour
 
         UpdateSwingOverlayFlip();
         state = CharState.Swinging;
+        SoundManager.PlaySFX("whoosh");
     }
 
     void SetupOverhead()
@@ -393,20 +605,32 @@ public class AIController : MonoBehaviour
             swingRenderer.sprite = backhandSwingFrames[0];
 
         swingRenderer.transform.localPosition = new Vector3(overlayOffsetUnderhand.x, overlayOffsetUnderhand.y, 0);
+
+        // 确保球在发球位置（remote角色不会跑Update的发球跟随逻辑）
+        if (shuttlecock != null && !shuttlecock.isInPlay && serveMarker != null)
+            shuttlecock.transform.position = serveMarker.position;
     }
 
     void ApplyServeHit()
     {
         if (shuttlecock == null) return;
 
-        float hitSpeed = hitSpeedServe * powerModifier * powerLevel;
-        float hitDir = 45f * facing;
-        if (facing < 0) hitDir += 180f;
-        shuttlecock.HitMe(hitSpeed, hitDir, "serve");
-        shuttlecock.lastHitter = name;
+        // 远程端只播放动画，不执行实际击球
+        if (!isNetworkRemote)
+        {
+            float hitSpeed = hitSpeedServe * powerModifier * powerLevel;
+            float hitDir = 45f * facing;
+            if (facing < 0) hitDir += 180f;
+            shuttlecock.HitMe(hitSpeed, hitDir, "serve");
+            shuttlecock.lastHitter = name;
+
+            var sync = NetworkBattleSync.Instance;
+            if (sync != null) sync.SendHit(hitSpeed, hitDir, shuttlecock.transform.position);
+        }
+
         serving = false;
 
-        if (gameManager != null)
+        if (!isNetworkRemote && gameManager != null)
             gameManager.OnOpponentServe();
     }
 
@@ -433,13 +657,24 @@ public class AIController : MonoBehaviour
                     && currentSwingFrames != forehandSwingFrames)
                 {
                     currentSwingFrames = forehandSwingFrames;
-                    swingRenderer.transform.localPosition = new Vector3(overlayOffsetOverhead.x, overlayOffsetOverhead.y, 0);
                 }
+                swingRenderer.transform.localPosition = idleOverlayLocalPos;
                 swingRenderer.sprite = idleOverlaySprite != null ? idleOverlaySprite : currentSwingFrames[0];
                 UpdateSwingOverlayFlip();
                 hitZone.enabled = false;
                 hitZoneWasActive = false;
                 state = CharState.Idle;
+
+                // 没有打到球 + 按键还按着 → 立刻再挥
+                if (!swingStartedThisPress && shuttlecock != null && shuttlecock.isInPlay)
+                {
+                    bool swingHeld = Input.GetKey(KeyCode.DownArrow);
+                    if (swingHeld)
+                    {
+                        SwingMe();
+                        return;
+                    }
+                }
                 return;
             }
 
@@ -466,7 +701,7 @@ public class AIController : MonoBehaviour
             if (hitZone.enabled)
             {
                 UpdateHitZonePosition(smoothIdx);
-                if (shuttlecock != null && shuttlecock.isInPlay && !swingStartedThisPress)
+                if (shuttlecock != null && shuttlecock.isInPlay && !shuttlecock.hasScored && !swingStartedThisPress)
                     CheckSweptHit();
                 prevHeadWorldPos = hitZone.transform.position;
             }
@@ -559,7 +794,7 @@ public class AIController : MonoBehaviour
         serveRecovering = false;
         currentSwingFrames = forehandSwingFrames;
         swingRenderer.sprite = idleOverlaySprite != null ? idleOverlaySprite : currentSwingFrames[0];
-        swingRenderer.transform.localPosition = new Vector3(overlayOffsetOverhead.x, overlayOffsetOverhead.y, 0);
+        swingRenderer.transform.localPosition = idleOverlayLocalPos;
         UpdateSwingOverlayFlip();
         state = CharState.Idle;
     }
@@ -567,6 +802,14 @@ public class AIController : MonoBehaviour
     void ApplyHit()
     {
         if (shuttlecock == null || !shuttlecock.isInPlay) return;
+
+        if (isNetworkRemote)
+        {
+            // 远程端只播动画不击球
+            hitZone.enabled = false;
+            hitZoneWasActive = false;
+            return;
+        }
 
         float hitSpeed;
         float hitDir;
@@ -583,12 +826,17 @@ public class AIController : MonoBehaviour
         else
         {
             hitSpeed = hitSpeedUnderhand * powerModifier * powerLevel;
-            hitDir = 40f * facing;
+            float t = Mathf.InverseLerp(hitStartFrame, hitEndFrame, swingFrameIndex);
+            float shotAngle = Mathf.Lerp(backhandShotAngleStart, backhandShotAngleEnd, t);
+            hitDir = shotAngle * facing;
             if (facing < 0) hitDir += 180f;
         }
 
         shuttlecock.HitMe(hitSpeed, hitDir);
         shuttlecock.lastHitter = name;
+
+        var sync = NetworkBattleSync.Instance;
+        if (sync != null) sync.SendHit(hitSpeed, hitDir, shuttlecock.transform.position);
 
         hitZone.enabled = false;
         hitZoneWasActive = false;
@@ -638,8 +886,8 @@ public class AIController : MonoBehaviour
             if (walkFrameTimer >= 1f / walkFPS)
             {
                 walkFrameTimer = 0f;
-                bool movingForward = (facing == 1 && Input.GetKey(KeyCode.RightArrow))
-                    || (facing == -1 && Input.GetKey(KeyCode.LeftArrow));
+                bool movingForward = (facing == 1 && (MobileInput.MoveRight() || Input.GetKey(KeyCode.RightArrow)))
+                    || (facing == -1 && (MobileInput.MoveLeft() || Input.GetKey(KeyCode.LeftArrow)));
                 Sprite[] frames = movingForward ? walkRightFrames : walkLeftFrames;
                 if (frames != null && frames.Length > 0)
                 {
@@ -740,6 +988,50 @@ public class AIController : MonoBehaviour
         }
     }
 
+    void LateUpdate()
+    {
+        if (isNetworkRemote) return;
+        var sync = NetworkBattleSync.Instance;
+        if (sync != null && shuttlecock != null)
+            sync.SendClientState(transform.position, facing,
+                state == CharState.Swinging, state == CharState.Serving, isWalking,
+                shuttlecock.transform.position, shuttlecock.isInPlay);
+    }
+
+    private bool remoteWasSwing;
+
+    void UpdateRemoteVisuals()
+    {
+        if (state == CharState.Swinging)
+            UpdateSwingAnimation();
+        else if (state == CharState.Serving)
+            UpdateServeAnimation();
+        else if (state == CharState.Recovering)
+            UpdateServeRecovery();
+        UpdateWalkAnimation();
+    }
+
+    void ApplyRemoteState()
+    {
+        var sync = NetworkBattleSync.Instance;
+        if (sync == null || !sync.Received) return;
+        transform.position = sync.RemotePos;
+        facing = sync.RemoteFacing;
+        Vector3 scale = transform.localScale;
+        scale.x = Mathf.Abs(scale.x) * facing;
+        transform.localScale = scale;
+        UpdateSwingOverlayFlip();
+
+        if ((sync.RemoteSwing || sync.RemoteServe) && !remoteWasSwing)
+            SwingMe();
+        remoteWasSwing = sync.RemoteSwing || sync.RemoteServe;
+
+        isWalking = sync.RemoteWalk;
+        // 发球阶段同步球位置（球跟着发球者），飞行阶段不覆盖主机物理
+        if (shuttlecock != null && !sync.BirdieInPlay && serving)
+            shuttlecock.transform.position = sync.BirdiePos;
+    }
+
     void OnDrawGizmosSelected()
     {
 #if UNITY_EDITOR
@@ -805,6 +1097,11 @@ public class AIController : MonoBehaviour
         UnityEditor.Handles.color = new Color(0.3f, 0.3f, 1f, 0.8f);
         UnityEditor.Handles.DrawLine(new Vector3(moveMaxX, gy, 0), new Vector3(moveMaxX, cy, 0));
         UnityEditor.Handles.Label(new Vector3(moveMaxX, gy - 0.3f, 0), $"右边界 {moveMaxX}");
+
+        // AI 防守站位
+        UnityEditor.Handles.color = new Color(0f, 1f, 1f, 0.7f);
+        UnityEditor.Handles.DrawWireDisc(new Vector3(aiIdlePositionX, transform.position.y, 0), Vector3.forward, 0.3f);
+        UnityEditor.Handles.Label(new Vector3(aiIdlePositionX, transform.position.y - 0.5f, 0), $"AI防守={aiIdlePositionX}");
 #endif
     }
 

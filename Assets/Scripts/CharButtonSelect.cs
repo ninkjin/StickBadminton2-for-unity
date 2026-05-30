@@ -4,8 +4,11 @@ using UnityEngine.UI;
 [RequireComponent(typeof(Button))]
 public class CharButtonSelect : MonoBehaviour
 {
-    [Header("对应的角色图片")]
+    [Header("选人界面展示的全身图")]
     public Sprite characterSprite;
+
+    [Header("传给战斗场景的头像")]
+    public Sprite portraitSprite;
 
     [Header("管理器")]
     public CharacterSlideIn manager;
@@ -21,6 +24,6 @@ public class CharButtonSelect : MonoBehaviour
     private void OnButtonClicked()
     {
         if (manager != null)
-            manager.TrySelect(characterSprite);
+            manager.TrySelect(characterSprite, portraitSprite);
     }
 }

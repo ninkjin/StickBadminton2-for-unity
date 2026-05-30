@@ -488,6 +488,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   characterSprite: {fileID: 21300000, guid: 0a8172ed07982474f8efa98943df2abb, type: 3}
+  portraitSprite: {fileID: 21300000, guid: 5077a384d3c28e849a91a0d8c49a5347, type: 3}
   manager: {fileID: 1366987551}
 --- !u!1 &206159792
 GameObject:
@@ -668,7 +669,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 1d464dc506a55014287afb20d842f834, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  characterSprite: {fileID: 21300000, guid: 661fb263f2c3b6a4194b0a1b49a7ee44, type: 3}
+  characterSprite: {fileID: 21300000, guid: 9973ec2d3352868439899bd9be8330a6, type: 3}
+  portraitSprite: {fileID: 21300000, guid: af69afb7c77e70f4698406dc80c223dc, type: 3}
   manager: {fileID: 1366987551}
 --- !u!1 &262617266
 GameObject:
@@ -959,7 +961,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 1d464dc506a55014287afb20d842f834, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  characterSprite: {fileID: 21300000, guid: 6c763afda8cd5a549be042c17b941f9a, type: 3}
+  characterSprite: {fileID: 21300000, guid: 42a33f779b393fd44bd53d43653b1c76, type: 3}
+  portraitSprite: {fileID: 21300000, guid: 9b632a7bed59287438280aea7e6e6c21, type: 3}
   manager: {fileID: 1366987551}
 --- !u!1 &571679762
 GameObject:
@@ -1182,7 +1185,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 1d464dc506a55014287afb20d842f834, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  characterSprite: {fileID: 21300000, guid: d658b52fae6288547b6bd3ac079e2515, type: 3}
+  characterSprite: {fileID: 21300000, guid: 6c763afda8cd5a549be042c17b941f9a, type: 3}
+  portraitSprite: {fileID: 21300000, guid: aeab9d36f361d3141b9aa3e3d3afc1be, type: 3}
   manager: {fileID: 1366987551}
 --- !u!1 &1109491538
 GameObject:
@@ -2027,6 +2031,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   characterSprite: {fileID: 21300000, guid: d16e4bb69a621674397c42936b11d910, type: 3}
+  portraitSprite: {fileID: 21300000, guid: e00dfe1191002b4449f29821fdb49e59, type: 3}
   manager: {fileID: 1366987551}
 --- !u!1 &1552770241
 GameObject:
@@ -2367,7 +2372,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 1d464dc506a55014287afb20d842f834, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  characterSprite: {fileID: 21300000, guid: 42a33f779b393fd44bd53d43653b1c76, type: 3}
+  characterSprite: {fileID: 21300000, guid: 661fb263f2c3b6a4194b0a1b49a7ee44, type: 3}
+  portraitSprite: {fileID: 21300000, guid: 77279a2f88b9aef4db302ffd88f345e2, type: 3}
   manager: {fileID: 1366987551}
 --- !u!1 &1814602899
 GameObject:
@@ -2623,7 +2629,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 1d464dc506a55014287afb20d842f834, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  characterSprite: {fileID: 21300000, guid: c7bceff84cbfce647b10894beffbad76, type: 3}
+  characterSprite: {fileID: 21300000, guid: d658b52fae6288547b6bd3ac079e2515, type: 3}
+  portraitSprite: {fileID: 21300000, guid: 4aaae63bb9eeb2a4aa92989f09729379, type: 3}
   manager: {fileID: 1366987551}
 --- !u!1 &2024377067
 GameObject:

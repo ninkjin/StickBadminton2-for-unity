@@ -55,6 +55,8 @@ public class BattleCharacter : MonoBehaviour
     public float racketAngleEnd = -40f;    // 正手挥拍晚期
     public float racketAngleStartBackhand = 30f;   // 反手挥拍早期（逆时针）
     public float racketAngleEndBackhand = 210f;    // 反手挥拍晚期（逆时针）
+    public float backhandShotAngleStart = 70f;     // 反手挥拍早期出球角度
+    public float backhandShotAngleEnd = 15f;       // 反手挥拍晚期出球角度
 
     [Header("碰撞")]
     public Vector2 colliderSize = new Vector2(0.8f, 1.5f);
@@ -63,6 +65,9 @@ public class BattleCharacter : MonoBehaviour
     [Header("引用")]
     public Shuttlecock shuttlecock;
     public GameManager gameManager;
+
+    [HideInInspector] public bool isNetworkRemote = false;
+    [HideInInspector] public bool isNetworkHost = false;
 
     private enum CharState { Idle, Walking, Jumping, Swinging, Serving, Recovering }
     private CharState state = CharState.Idle;
@@ -100,6 +105,7 @@ public class BattleCharacter : MonoBehaviour
     private bool serveHitApplied = false;
     private bool holdingSwing = false;
     private bool swingIsMiss = false;
+    private Vector3 idleOverlayLocalPos;
 
     void Awake()
     {
@@ -151,6 +157,7 @@ public class BattleCharacter : MonoBehaviour
         else if (overheadSwingFrames != null && overheadSwingFrames.Length > 0)
             swingRenderer.sprite = overheadSwingFrames[0];
         swingRenderer.enabled = true;
+        idleOverlayLocalPos = swingRenderer.transform.localPosition;
 
         if (idleFrames != null && idleFrames.Length > 0)
             sr.sprite = idleFrames[0];
@@ -159,6 +166,12 @@ public class BattleCharacter : MonoBehaviour
     void Update()
     {
         if (!Application.isPlaying) return;
+        if (isNetworkRemote)
+        {
+            ApplyRemoteState();
+            UpdateRemoteVisuals();
+            return;
+        }
 
         float dt = Time.deltaTime;
 
@@ -236,19 +249,19 @@ public class BattleCharacter : MonoBehaviour
         isWalking = false;
         float moveX = 0f;
 
-        if (Input.GetKey(KeyCode.D))
+        if (MobileInput.MoveRight())
         {
             moveX = moveSpeed * moveModifier * Time.deltaTime;
             if (isGrounded) isWalking = true;
         }
-        else if (Input.GetKey(KeyCode.A))
+        else if (MobileInput.MoveLeft())
         {
             moveX = -moveSpeed * moveModifier * Time.deltaTime;
             if (isGrounded) isWalking = true;
         }
 
-        // Jump: W key, with double jump（挥拍时不允许跳跃改变状态）
-        bool jumpPressed = Input.GetKey(KeyCode.W);
+        // Jump: W key, with double jump
+        bool jumpPressed = MobileInput.JumpDown();
         if (jumpPressed && !jumpKeyReady)
         {
             // Key was already down, don't re-trigger
@@ -301,7 +314,7 @@ public class BattleCharacter : MonoBehaviour
 
     void HandleSwingInput()
     {
-        bool swingKeyDown = Input.GetKey(KeyCode.S) || Input.GetKey(KeyCode.Space);
+        bool swingKeyDown = MobileInput.Swing();
 
         if (swingKeyDown && !holdingSwing)
         {
@@ -314,9 +327,14 @@ public class BattleCharacter : MonoBehaviour
         }
     }
 
-    void SwingMe()
+    public void SwingMe()
     {
         if (state == CharState.Swinging || state == CharState.Serving) return;
+
+        // 立即发送挥拍事件（不经节流）
+        var sync = NetworkBattleSync.Instance;
+        if (sync != null && !isNetworkRemote)
+            sync.SendSwingEvent(serving);
 
         // Serving: start serve swing animation (don't hit immediately)
         if (serving)
@@ -357,6 +375,7 @@ public class BattleCharacter : MonoBehaviour
 
         UpdateSwingOverlayFlip();
         state = CharState.Swinging;
+        SoundManager.PlaySFX("whoosh");
     }
 
     void SetupOverhead()
@@ -388,20 +407,32 @@ public class BattleCharacter : MonoBehaviour
             swingRenderer.sprite = underhandSwingFrames[0];
 
         swingRenderer.transform.localPosition = new Vector3(overlayOffsetUnderhand.x, overlayOffsetUnderhand.y, 0);
+
+        // 确保球在发球位置（remote角色不会跑Update的发球跟随逻辑）
+        if (shuttlecock != null && !shuttlecock.isInPlay && serveMarker != null)
+            shuttlecock.transform.position = serveMarker.position;
     }
 
     void ApplyServeHit()
     {
         if (shuttlecock == null) return;
 
-        float hitSpeed = hitSpeedServe * powerModifier * powerLevel;
-        float hitDir = 45f * facing;
-        if (facing < 0) hitDir += 180f;
-        shuttlecock.HitMe(hitSpeed, hitDir, "serve");
-        shuttlecock.lastHitter = name;
+        // 远程端只播放动画，不执行实际击球
+        if (!isNetworkRemote)
+        {
+            float hitSpeed = hitSpeedServe * powerModifier * powerLevel;
+            float hitDir = 45f * facing;
+            if (facing < 0) hitDir += 180f;
+            shuttlecock.HitMe(hitSpeed, hitDir, "serve");
+            shuttlecock.lastHitter = name;
+
+            var sync = NetworkBattleSync.Instance;
+            if (sync != null) sync.SendHit(hitSpeed, hitDir, shuttlecock.transform.position);
+        }
+
         serving = false;
 
-        if (gameManager != null)
+        if (!isNetworkRemote && gameManager != null)
             gameManager.OnPlayerServe();
     }
 
@@ -428,13 +459,24 @@ public class BattleCharacter : MonoBehaviour
                     && currentSwingFrames != overheadSwingFrames)
                 {
                     currentSwingFrames = overheadSwingFrames;
-                    swingRenderer.transform.localPosition = new Vector3(overlayOffsetOverhead.x, overlayOffsetOverhead.y, 0);
                 }
+                swingRenderer.transform.localPosition = idleOverlayLocalPos;
                 swingRenderer.sprite = idleOverlaySprite != null ? idleOverlaySprite : currentSwingFrames[0];
                 UpdateSwingOverlayFlip();
                 hitZone.enabled = false;
                 hitZoneWasActive = false;
                 state = CharState.Idle;
+
+                // 没有打到球 + 按键还按着 → 立刻再挥（原版逻辑）
+                if (!swingStartedThisPress && shuttlecock != null && shuttlecock.isInPlay)
+                {
+                    bool swingHeld = MobileInput.Swing();
+                    if (swingHeld)
+                    {
+                        SwingMe();
+                        return;
+                    }
+                }
                 return;
             }
 
@@ -461,7 +503,7 @@ public class BattleCharacter : MonoBehaviour
             if (hitZone.enabled)
             {
                 UpdateHitZonePosition(smoothIdx);
-                if (shuttlecock != null && shuttlecock.isInPlay && !swingStartedThisPress)
+                if (shuttlecock != null && shuttlecock.isInPlay && !shuttlecock.hasScored && !swingStartedThisPress)
                     CheckSweptHit();
                 prevHeadWorldPos = hitZone.transform.position;
             }
@@ -557,7 +599,7 @@ public class BattleCharacter : MonoBehaviour
         serveRecovering = false;
         currentSwingFrames = overheadSwingFrames;
         swingRenderer.sprite = idleOverlaySprite != null ? idleOverlaySprite : currentSwingFrames[0];
-        swingRenderer.transform.localPosition = new Vector3(overlayOffsetOverhead.x, overlayOffsetOverhead.y, 0);
+        swingRenderer.transform.localPosition = idleOverlayLocalPos;
         UpdateSwingOverlayFlip();
         state = CharState.Idle;
     }
@@ -566,6 +608,14 @@ public class BattleCharacter : MonoBehaviour
     {
         if (shuttlecock == null || !shuttlecock.isInPlay) return;
 
+        if (isNetworkRemote)
+        {
+            // 远程端只播动画不击球
+            hitZone.enabled = false;
+            hitZoneWasActive = false;
+            return;
+        }
+
         float hitSpeed;
         float hitDir;
 
@@ -573,8 +623,6 @@ public class BattleCharacter : MonoBehaviour
         {
             hitSpeed = hitSpeedOverhead * powerModifier * powerLevel;
 
-            // 挥拍时机 → 球拍角度 → 出球角度（原版逻辑）
-            // 早帧=球拍后倾=高吊球, 中帧=球拍垂直=平击/扣杀, 晚帧=球拍前倾=下网
             float t = Mathf.InverseLerp(hitStartFrame, hitEndFrame, swingFrameIndex);
             float racketAngle = Mathf.Lerp(racketAngleStart, racketAngleEnd, t);
             hitDir = (racketAngle + 30f) * facing;
@@ -583,13 +631,17 @@ public class BattleCharacter : MonoBehaviour
         else
         {
             hitSpeed = hitSpeedUnderhand * powerModifier * powerLevel;
-            // 反手固定角度（原版逻辑）
-            hitDir = 40f * facing;
+            float t = Mathf.InverseLerp(hitStartFrame, hitEndFrame, swingFrameIndex);
+            float shotAngle = Mathf.Lerp(backhandShotAngleStart, backhandShotAngleEnd, t);
+            hitDir = shotAngle * facing;
             if (facing < 0) hitDir += 180f;
         }
 
         shuttlecock.HitMe(hitSpeed, hitDir);
         shuttlecock.lastHitter = name;
+
+        var sync = NetworkBattleSync.Instance;
+        if (sync != null) sync.SendHit(hitSpeed, hitDir, shuttlecock.transform.position);
 
         hitZone.enabled = false;
         hitZoneWasActive = false;
@@ -642,8 +694,8 @@ public class BattleCharacter : MonoBehaviour
             if (walkFrameTimer >= 1f / walkFPS)
             {
                 walkFrameTimer = 0f;
-                bool movingForward = (facing == 1 && Input.GetKey(KeyCode.D))
-                    || (facing == -1 && Input.GetKey(KeyCode.A));
+                bool movingForward = (facing == 1 && MobileInput.MoveRight())
+                    || (facing == -1 && MobileInput.MoveLeft());
                 Sprite[] frames = movingForward ? walkForwardFrames : walkBackwardFrames;
                 if (frames != null && frames.Length > 0)
                 {
@@ -741,6 +793,54 @@ public class BattleCharacter : MonoBehaviour
                 shuttlecock.transform.position = serveMarker.position;
             serveFollowOffset = shuttlecock.transform.position - transform.position;
         }
+    }
+
+    void LateUpdate()
+    {
+        if (isNetworkRemote) return;
+        var sync = NetworkBattleSync.Instance;
+        if (sync != null && shuttlecock != null)
+            sync.SendHostState(transform.position, facing,
+                state == CharState.Swinging, state == CharState.Serving, isWalking,
+                shuttlecock.transform.position, shuttlecock.isInPlay);
+    }
+
+    private bool remoteWasSwing;
+
+    void UpdateRemoteVisuals()
+    {
+        if (state == CharState.Swinging)
+            UpdateSwingAnimation();
+        else if (state == CharState.Serving)
+            UpdateServeAnimation();
+        else if (state == CharState.Recovering)
+            UpdateServeRecovery();
+        UpdateWalkAnimation();
+    }
+
+    void ApplyRemoteState()
+    {
+        var sync = NetworkBattleSync.Instance;
+        if (sync == null || !sync.Received) return;
+        transform.position = sync.RemotePos;
+        facing = sync.RemoteFacing;
+        Vector3 scale = transform.localScale;
+        scale.x = Mathf.Abs(scale.x) * facing;
+        transform.localScale = scale;
+        UpdateSwingOverlayFlip();
+
+        if ((sync.RemoteSwing || sync.RemoteServe) && !remoteWasSwing)
+            SwingMe();
+        remoteWasSwing = sync.RemoteSwing || sync.RemoteServe;
+
+        isWalking = sync.RemoteWalk;
+
+        // 球在飞行中同步位置
+        if (shuttlecock != null && sync.BirdieInPlay)
+            shuttlecock.transform.position = sync.BirdiePos;
+        // 发球阶段也同步（球跟着发球者）
+        if (shuttlecock != null && !sync.BirdieInPlay && serving)
+            shuttlecock.transform.position = sync.BirdiePos;
     }
 
     void OnDrawGizmosSelected()
