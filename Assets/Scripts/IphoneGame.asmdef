@@ -1,0 +1,8 @@
+﻿{
+    "name": "IphoneGame",
+    "references": [
+        "Unity.Netcode.Runtime",
+        "Unity.Collections"
+    ]
+}
+

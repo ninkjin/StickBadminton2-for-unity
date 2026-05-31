@@ -1,0 +1,13 @@
+﻿{
+    "name": "EditModeTests",
+    "references": [
+        "IphoneGame"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "optionalUnityReferences": [
+        "TestAssemblies"
+    ]
+}
+

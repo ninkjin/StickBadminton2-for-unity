@@ -1,9 +1,24 @@
-using UnityEngine;
 using Unity.Netcode;
+using UnityEngine;
 
 public class NetworkBattleSync : MonoBehaviour
 {
+    const byte MsgState = 1;
+    const byte MsgHit = 2;
+    const byte MsgScore = 3;
+    const byte MsgSwing = 4;
+    const byte MsgPause = 5;
+
+    const byte SideHost = 0;
+    const byte SideClient = 1;
+    const byte ServerLeft = 0;
+    const byte ServerRight = 1;
+
     public static NetworkBattleSync Instance { get; private set; }
+
+    [Header("Snapshot Playback")]
+    public float interpolationDelay = 0.04f;
+    public float stateSendRate = 90f;
 
     public Vector2 RemotePos;
     public int RemoteFacing = 1;
@@ -14,9 +29,39 @@ public class NetworkBattleSync : MonoBehaviour
 
     public Vector2 BirdiePos;
     public bool BirdieInPlay;
+    public float BirdieUpdateTime;
+    public bool IsScorePending => pendingScore.Active;
+
+    readonly NetworkSnapshotBuffer remoteSnapshots = new NetworkSnapshotBuffer();
 
     bool ready;
-    int sendCounter;
+    float logTimer;
+    float lastHostStateSent;
+    float lastClientStateSent;
+    int hostStateSequence;
+    int clientStateSequence;
+
+    int lastSwingEventId;
+    int swingEventId;
+
+    int lastHitId;
+    float lastHitSpeed;
+    float lastHitDir;
+    float lastHitPosX;
+    float lastHitPosY;
+    int processedHitId = -1;
+
+    PendingScore pendingScore;
+
+    struct PendingScore
+    {
+        public bool Active;
+        public int Left;
+        public int Right;
+        public string Server;
+        public Vector2 LandingPos;
+        public double EventTime;
+    }
 
     void Awake()
     {
@@ -25,27 +70,31 @@ public class NetworkBattleSync : MonoBehaviour
         DontDestroyOnLoad(gameObject);
     }
 
-    float logTimer;
-
     void Update()
     {
-        if (NetworkManager.Singleton != null && NetworkManager.Singleton.IsListening)
+        var nm = NetworkManager.Singleton;
+        if (nm != null && nm.IsListening)
         {
             if (!ready)
             {
-                NetworkManager.Singleton.CustomMessagingManager.RegisterNamedMessageHandler("BS", OnMsg);
+                nm.CustomMessagingManager.RegisterNamedMessageHandler("BS", OnMsg);
                 ready = true;
-                Debug.Log("[BS] handler 已注册");
+                Debug.Log("[BS] handler registered");
             }
         }
         else
         {
             ready = false;
+            remoteSnapshots.Clear();
+            Received = false;
         }
+
+        TryApplyPendingScore();
+
         logTimer += Time.deltaTime;
-        if (logTimer > 3f)
+        if (logTimer > 3f && nm != null)
         {
-            Debug.Log($"[BS] Alive, Received={Received} isServer={NetworkManager.Singleton.IsServer}");
+            Debug.Log($"[BS] Alive, Received={Received} isServer={nm.IsServer}");
             logTimer = 0f;
         }
     }
@@ -56,198 +105,322 @@ public class NetworkBattleSync : MonoBehaviour
             NetworkManager.Singleton.CustomMessagingManager.UnregisterNamedMessageHandler("BS");
     }
 
+    public bool TryGetRemoteSnapshot(out BattleSnapshot snapshot)
+    {
+        double renderTime = NetworkTime - interpolationDelay;
+        return remoteSnapshots.TrySample(renderTime, out snapshot);
+    }
+
+    double NetworkTime
+    {
+        get
+        {
+            var nm = NetworkManager.Singleton;
+            if (nm != null && nm.IsListening)
+                return nm.ServerTime.Time;
+            return Time.unscaledTimeAsDouble;
+        }
+    }
+
     void OnMsg(ulong senderId, FastBufferReader reader)
     {
-        reader.ReadValueSafe(out string msg);
-        var p = msg.Split('|');
-        if (p.Length < 2) return;
-
-        if (p[0] == "M")
+        reader.ReadValueSafe(out byte type);
+        switch (type)
         {
-            bool isSvr = NetworkManager.Singleton.IsServer;
-            if (isSvr) return;
-            Debug.Log($"[BS] 收到暂停命令: {p[1]}");
-            HandlePauseCommand(p[1]);
+            case MsgState:
+                HandleState(reader);
+                break;
+            case MsgHit:
+                HandleHit(senderId, reader);
+                break;
+            case MsgScore:
+                HandleScore(reader);
+                break;
+            case MsgSwing:
+                HandleSwing(senderId, reader);
+                break;
+            case MsgPause:
+                HandlePause(reader);
+                break;
+        }
+    }
+
+    void HandleState(FastBufferReader reader)
+    {
+        reader.ReadValueSafe(out byte side);
+        reader.ReadValueSafe(out int seq);
+        reader.ReadValueSafe(out double remoteTime);
+        reader.ReadValueSafe(out Vector2 pos);
+        reader.ReadValueSafe(out int facing);
+        reader.ReadValueSafe(out byte flagsByte);
+        reader.ReadValueSafe(out Vector2 birdiePos);
+        reader.ReadValueSafe(out int leftScore);
+        reader.ReadValueSafe(out int rightScore);
+        reader.ReadValueSafe(out byte serverByte);
+        reader.ReadValueSafe(out int hitId);
+        reader.ReadValueSafe(out float hitSpeed);
+        reader.ReadValueSafe(out float hitDir);
+        reader.ReadValueSafe(out Vector2 hitPos);
+
+        bool isHostMsg = side == SideHost;
+        bool isServer = NetworkManager.Singleton.IsServer;
+        if ((isServer && isHostMsg) || (!isServer && !isHostMsg))
             return;
+
+        var flags = (BattleSnapshotFlags)flagsByte;
+        var snapshot = new BattleSnapshot
+        {
+            Sequence = seq,
+            RemoteTime = remoteTime,
+            CharacterPosition = pos,
+            BirdiePosition = birdiePos,
+            Facing = facing,
+            Flags = flags
+        };
+
+        if (!remoteSnapshots.Add(snapshot))
+            return;
+
+        RemotePos = pos;
+        RemoteFacing = facing;
+        RemoteSwing = snapshot.IsSwinging;
+        RemoteServe = snapshot.IsServing;
+        RemoteWalk = snapshot.IsWalking;
+        BirdiePos = birdiePos;
+        BirdieUpdateTime = Time.time;
+        BirdieInPlay = snapshot.IsBirdieInPlay;
+        Received = true;
+
+        if (isHostMsg)
+            HandleHostScoreBackup(leftScore, rightScore, serverByte, birdiePos, remoteTime, snapshot.IsBirdieInPlay);
+
+        if (hitId > 0 && hitId != processedHitId)
+        {
+            processedHitId = hitId;
+            ApplyRemoteHit(hitSpeed, hitDir, hitPos);
+            Debug.Log($"[BS] backup hit applied: speed={hitSpeed:F2} dir={hitDir:F2} pos={hitPos}");
+        }
+    }
+
+    void HandleHostScoreBackup(int left, int right, byte serverByte, Vector2 landingPos, double eventTime, bool birdieInPlay)
+    {
+        if (birdieInPlay || pendingScore.Active)
+            return;
+
+        var gm = FindObjectOfType<GameManager>();
+        int localTotal = gm != null ? gm.leftScore + gm.rightScore : 0;
+        int remoteTotal = left + right;
+        if (gm != null && remoteTotal > localTotal)
+            QueueScoreSync(left, right, DecodeServer(serverByte), landingPos, eventTime);
+    }
+
+    void HandleHit(ulong senderId, FastBufferReader reader)
+    {
+        bool isServer = NetworkManager.Singleton.IsServer;
+        bool fromServer = senderId == NetworkManager.ServerClientId;
+        if (isServer == fromServer)
+            return;
+
+        reader.ReadValueSafe(out float speed);
+        reader.ReadValueSafe(out float dir);
+        reader.ReadValueSafe(out Vector2 ballPos);
+        reader.ReadValueSafe(out int hitId);
+
+        if (hitId == processedHitId)
+            return;
+
+        processedHitId = hitId;
+        ApplyRemoteHit(speed, dir, ballPos);
+        Debug.Log($"[BS] hit event applied: speed={speed:F2} dir={dir:F2} pos={ballPos}");
+    }
+
+    void ApplyRemoteHit(float speed, float dir, Vector2 ballPos)
+    {
+        var sc = FindObjectOfType<Shuttlecock>();
+        if (sc == null)
+            return;
+
+        sc.transform.position = new Vector3(ballPos.x, ballPos.y, sc.transform.position.z);
+        sc.HitMe(speed, dir);
+
+        var gm = FindObjectOfType<GameManager>();
+        if (gm != null && gm.state != GameState.Playing && gm.state != GameState.GameOver)
+            gm.state = GameState.Playing;
+    }
+
+    void HandleScore(FastBufferReader reader)
+    {
+        if (NetworkManager.Singleton.IsServer)
+            return;
+
+        reader.ReadValueSafe(out int left);
+        reader.ReadValueSafe(out int right);
+        reader.ReadValueSafe(out byte serverByte);
+        reader.ReadValueSafe(out Vector2 landingPos);
+        reader.ReadValueSafe(out double eventTime);
+
+        QueueScoreSync(left, right, DecodeServer(serverByte), landingPos, eventTime);
+    }
+
+    void QueueScoreSync(int left, int right, string server, Vector2 landingPos, double eventTime)
+    {
+        pendingScore = new PendingScore
+        {
+            Active = true,
+            Left = left,
+            Right = right,
+            Server = server,
+            LandingPos = landingPos,
+            EventTime = eventTime > 0 ? eventTime : NetworkTime
+        };
+        BirdieInPlay = true;
+        Debug.Log($"[BS] score queued: {left}-{right} server={server} eventTime={pendingScore.EventTime:F3}");
+    }
+
+    void TryApplyPendingScore()
+    {
+        if (!pendingScore.Active)
+            return;
+
+        if (NetworkTime < pendingScore.EventTime + interpolationDelay)
+            return;
+
+        var sc = FindObjectOfType<Shuttlecock>();
+        if (sc != null)
+        {
+            sc.transform.position = new Vector3(pendingScore.LandingPos.x, pendingScore.LandingPos.y, sc.transform.position.z);
+            sc.isInPlay = false;
+            sc.hasScored = false;
+            sc.dx = 0f;
+            sc.dy = 0f;
         }
 
-        if (p.Length < 3) return;
+        BirdieInPlay = false;
 
-        if (p[0] == "P")
+        var gm = FindObjectOfType<GameManager>();
+        if (gm != null)
         {
-            bool isHostMsg = p[1] == "H";
-            bool isSvr = NetworkManager.Singleton.IsServer;
+            gm.ApplyScoreSync(pendingScore.Left, pendingScore.Right, pendingScore.Server);
+            Debug.Log($"[BS] score applied: {gm.leftScore}-{gm.rightScore} server={gm.server}");
+        }
 
-            if ((isSvr && isHostMsg) || (!isSvr && !isHostMsg)) return;
+        pendingScore.Active = false;
+    }
 
-            RemotePos = new Vector2(float.Parse(p[2]), float.Parse(p[3]));
-            RemoteFacing = int.Parse(p[4]);
-            RemoteSwing = p[5] == "1";
-            RemoteServe = p[6] == "1";
-            RemoteWalk = p[7] == "1";
-            Received = true;
+    void HandleSwing(ulong senderId, FastBufferReader reader)
+    {
+        bool isServer = NetworkManager.Singleton.IsServer;
+        bool fromServer = senderId == NetworkManager.ServerClientId;
+        if (isServer == fromServer)
+            return;
 
-            // 球数据：H消息总是接受；C消息只在球未飞行时接受（发球阶段）
-            if (p.Length > 10)
+        reader.ReadValueSafe(out byte isServeByte);
+        reader.ReadValueSafe(out int evtId);
+        if (evtId == lastSwingEventId)
+            return;
+
+        lastSwingEventId = evtId;
+        bool isServe = isServeByte != 0;
+        Debug.Log($"[BS] swing event received: isServe={isServe} id={evtId}");
+
+        if (isServer)
+        {
+            var ai = FindObjectOfType<AIController>();
+            if (ai != null && ai.isNetworkRemote)
             {
-                bool bInPlay = p[10] == "1";
-                if (isHostMsg || !bInPlay)
-                {
-                    BirdiePos = new Vector2(float.Parse(p[8]), float.Parse(p[9]));
-                    BirdieInPlay = bInPlay;
-                }
-            }
-            // 比分数据：H消息附带权威比分（S消息的冗余备份，防UDP丢包）
-            if (isHostMsg && p.Length > 13)
-            {
-                int rLeft = int.Parse(p[11]);
-                int rRight = int.Parse(p[12]);
-                string rServer = p[13];
-                var gm = FindObjectOfType<GameManager>();
-                int localTotal = gm != null ? gm.leftScore + gm.rightScore : 0;
-                int remoteTotal = rLeft + rRight;
-                // 总分数单调递增：防止旧P消息覆盖新比分
-                if (gm != null && remoteTotal > localTotal)
-                {
-                    var sc = FindObjectOfType<Shuttlecock>();
-                    bool ballStopped = sc == null || !sc.isInPlay;
-                    Debug.Log($"[BS] P消息比分更新: 本地{gm.leftScore}-{gm.rightScore}(t={localTotal}) -> 远程{rLeft}-{rRight}(t={remoteTotal}), ballStopped={ballStopped}, state={gm.state}");
-                    if (ballStopped)
-                    {
-                        gm.ApplyScoreSync(rLeft, rRight, rServer);
-                    }
-                    else
-                    {
-                        gm.leftScore = rLeft;
-                        gm.rightScore = rRight;
-                        gm.server = rServer;
-                    }
-                }
-            }
-            // 击球数据：H/C消息附带击球参数（H事件的冗余备份，防UDP丢包）
-            if (p.Length > 18)
-            {
-                int hitId = int.Parse(p[14]);
-                if (hitId != processedHitId && hitId > 0)
-                {
-                    processedHitId = hitId;
-                    float hSpd = float.Parse(p[15]);
-                    float hDir = float.Parse(p[16]);
-                    float hPx = float.Parse(p[17]);
-                    float hPy = float.Parse(p[18]);
-                    var sc = FindObjectOfType<Shuttlecock>();
-                    if (sc != null)
-                    {
-                        sc.transform.position = new Vector3(hPx, hPy, sc.transform.position.z);
-                        sc.HitMe(hSpd, hDir);
-                        var gm2 = FindObjectOfType<GameManager>();
-                        if (gm2 != null && gm2.state != GameState.Playing && gm2.state != GameState.GameOver)
-                            gm2.state = GameState.Playing;
-                        Debug.Log($"[BS] P消息冗余击球: speed={hSpd} dir={hDir} pos=({hPx:F2},{hPy:F2})");
-                    }
-                }
+                if (isServe) { ai.serving = true; ai.SetupServe(); }
+                ai.SwingMe();
             }
         }
-        else if (p[0] == "H")
+        else
         {
-            bool isSvr = NetworkManager.Singleton.IsServer;
-            bool fromServer = senderId == NetworkManager.ServerClientId;
-            Debug.Log($"[BS] H事件: isServer={isSvr} fromServer={fromServer} msg={msg}");
-            if (isSvr == fromServer) return;
-            // 去重：P消息已处理过的跳过
-            if (p.Length >= 6 && int.Parse(p[5]) == processedHitId) return;
-            var sc = FindObjectOfType<Shuttlecock>();
-            if (sc != null)
+            var player = FindObjectOfType<BattleCharacter>();
+            if (player != null && player.isNetworkRemote)
             {
-                float spd = float.Parse(p[1]);
-                float dir = float.Parse(p[2]);
-                if (p.Length >= 5)
-                    sc.transform.position = new Vector3(float.Parse(p[3]), float.Parse(p[4]), sc.transform.position.z);
-                sc.HitMe(spd, dir);
-                if (p.Length >= 6)
-                    processedHitId = int.Parse(p[5]);
-                // 接收方切到Playing（不只是WaitingToServe：PointScored倒计时未结束时发球也需处理）
-                var gm = FindObjectOfType<GameManager>();
-                if (gm != null && gm.state != GameState.Playing && gm.state != GameState.GameOver)
-                {
-                    Debug.Log($"[BS] H事件触发状态切换: {gm.state} -> Playing");
-                    gm.state = GameState.Playing;
-                }
-                Debug.Log($"[BS] 远程击球执行: speed={spd} dir={dir} pos={sc.transform.position}");
-            }
-        }
-        else if (p[0] == "S")
-        {
-            BirdieInPlay = false;
-            var gm = FindObjectOfType<GameManager>();
-            if (gm != null)
-            {
-                gm.ApplyScoreSync(int.Parse(p[1]), int.Parse(p[2]), p[3]);
-                Debug.Log($"[BS] 得分同步: {gm.leftScore}-{gm.rightScore} server={gm.server}");
-            }
-        }
-        else if (p[0] == "W")
-        {
-            bool isSvr = NetworkManager.Singleton.IsServer;
-            bool fromServer = senderId == NetworkManager.ServerClientId;
-            if (isSvr == fromServer) return;
-
-            int evtId = int.Parse(p[2]);
-            if (evtId == lastSwingEventId) return;
-            lastSwingEventId = evtId;
-
-            bool isServe = p[1] == "1";
-            Debug.Log($"[BS] 收到挥拍事件: isServe={isServe} id={evtId}");
-
-            if (isSvr)
-            {
-                var ai = FindObjectOfType<AIController>();
-                if (ai != null && ai.isNetworkRemote)
-                {
-                    if (isServe) { ai.serving = true; ai.SetupServe(); }
-                    ai.SwingMe();
-                }
-            }
-            else
-            {
-                var player = FindObjectOfType<BattleCharacter>();
-                if (player != null && player.isNetworkRemote)
-                {
-                    if (isServe) { player.serving = true; player.SetupServe(); }
-                    player.SwingMe();
-                }
+                if (isServe) { player.serving = true; player.SetupServe(); }
+                player.SwingMe();
             }
         }
     }
 
-    int lastSwingEventId;
+    void HandlePause(FastBufferReader reader)
+    {
+        if (NetworkManager.Singleton.IsServer)
+            return;
+
+        reader.ReadValueSafe(out string cmd);
+        Debug.Log($"[BS] pause command received: {cmd}");
+        HandlePauseCommand(cmd);
+    }
 
     public void SendHostState(Vector2 pos, int facing, bool swinging, bool serving, bool walking,
         Vector2 birdiePos, bool birdieInPlay)
     {
-        sendCounter++;
-        if (sendCounter % 3 != 0 && !swinging && !serving) return;
-        var gm = FindObjectOfType<GameManager>();
-        int l = gm != null ? gm.leftScore : 0;
-        int r = gm != null ? gm.rightScore : 0;
-        string srv = gm != null ? gm.server : "Left";
-        string msg = $"P|H|{pos.x:F2}|{pos.y:F2}|{facing}|{(swinging?1:0)}|{(serving?1:0)}|{(walking?1:0)}|{birdiePos.x:F2}|{birdiePos.y:F2}|{(birdieInPlay?1:0)}|{l}|{r}|{srv}|{lastHitId}|{lastHitSpeed:F2}|{lastHitDir:F2}|{lastHitPosX:F2}|{lastHitPosY:F2}";
-        Bcast(msg);
+        if (!ShouldSendState(ref lastHostStateSent))
+            return;
+
+        SendState(SideHost, ++hostStateSequence, pos, facing, swinging, serving, walking, birdiePos, birdieInPlay,
+            NetworkDelivery.UnreliableSequenced);
     }
 
     public void SendClientState(Vector2 pos, int facing, bool swinging, bool serving, bool walking,
         Vector2 birdiePos, bool birdieInPlay)
     {
-        sendCounter++;
-        if (sendCounter % 3 != 0 && !swinging && !serving) return;
-        string msg = $"P|C|{pos.x:F2}|{pos.y:F2}|{facing}|{(swinging?1:0)}|{(serving?1:0)}|{(walking?1:0)}|{birdiePos.x:F2}|{birdiePos.y:F2}|{(birdieInPlay?1:0)}|0|0|L|{lastHitId}|{lastHitSpeed:F2}|{lastHitDir:F2}|{lastHitPosX:F2}|{lastHitPosY:F2}";
-        SendToServer(msg);
+        if (!ShouldSendState(ref lastClientStateSent))
+            return;
+
+        SendState(SideClient, ++clientStateSequence, pos, facing, swinging, serving, walking, birdiePos, birdieInPlay,
+            NetworkDelivery.UnreliableSequenced);
     }
 
-    // 击球数据冗余：H事件丢失时P消息兜底
-    int lastHitId;
-    float lastHitSpeed, lastHitDir, lastHitPosX, lastHitPosY;
-    int processedHitId = -1;
+    bool ShouldSendState(ref float lastSent)
+    {
+        float minInterval = 1f / Mathf.Max(1f, stateSendRate);
+        if (Time.unscaledTime - lastSent < minInterval)
+            return false;
+
+        lastSent = Time.unscaledTime;
+        return true;
+    }
+
+    void SendState(byte side, int sequence, Vector2 pos, int facing, bool swinging, bool serving, bool walking,
+        Vector2 birdiePos, bool birdieInPlay, NetworkDelivery delivery)
+    {
+        var gm = FindObjectOfType<GameManager>();
+        int l = gm != null ? gm.leftScore : 0;
+        int r = gm != null ? gm.rightScore : 0;
+        byte server = gm != null ? EncodeServer(gm.server) : ServerLeft;
+
+        byte flags = 0;
+        if (swinging) flags |= (byte)BattleSnapshotFlags.Swinging;
+        if (serving) flags |= (byte)BattleSnapshotFlags.Serving;
+        if (walking) flags |= (byte)BattleSnapshotFlags.Walking;
+        if (birdieInPlay) flags |= (byte)BattleSnapshotFlags.BirdieInPlay;
+
+        var w = new FastBufferWriter(128, Unity.Collections.Allocator.Temp);
+        w.WriteValueSafe(MsgState);
+        w.WriteValueSafe(side);
+        w.WriteValueSafe(sequence);
+        w.WriteValueSafe(NetworkTime);
+        w.WriteValueSafe(pos);
+        w.WriteValueSafe(facing);
+        w.WriteValueSafe(flags);
+        w.WriteValueSafe(birdiePos);
+        w.WriteValueSafe(l);
+        w.WriteValueSafe(r);
+        w.WriteValueSafe(server);
+        w.WriteValueSafe(lastHitId);
+        w.WriteValueSafe(lastHitSpeed);
+        w.WriteValueSafe(lastHitDir);
+        w.WriteValueSafe(new Vector2(lastHitPosX, lastHitPosY));
+
+        if (NetworkManager.Singleton.IsServer)
+            Bcast(w, delivery);
+        else
+            SendToServer(w, delivery);
+
+        w.Dispose();
+    }
 
     public void SendHit(float speed, float dir, Vector2 ballPos)
     {
@@ -257,34 +430,50 @@ public class NetworkBattleSync : MonoBehaviour
         lastHitPosX = ballPos.x;
         lastHitPosY = ballPos.y;
 
-        string msg = $"H|{speed}|{dir}|{ballPos.x:F2}|{ballPos.y:F2}|{lastHitId}";
-        if (NetworkManager.Singleton.IsServer)
-            Bcast(msg);
-        else
-            SendToServer(msg);
-    }
+        var w = new FastBufferWriter(64, Unity.Collections.Allocator.Temp);
+        w.WriteValueSafe(MsgHit);
+        w.WriteValueSafe(speed);
+        w.WriteValueSafe(dir);
+        w.WriteValueSafe(ballPos);
+        w.WriteValueSafe(lastHitId);
 
-    // 挥拍事件（立即发送，不节流）
-    int swingEventId;
+        if (NetworkManager.Singleton.IsServer)
+            Bcast(w, NetworkDelivery.ReliableSequenced);
+        else
+            SendToServer(w, NetworkDelivery.ReliableSequenced);
+
+        w.Dispose();
+    }
 
     public void SendSwingEvent(bool isServe)
     {
         swingEventId++;
-        string msg = $"W|{(isServe ? 1 : 0)}|{swingEventId}";
-        Debug.Log($"[BS] 发送挥拍事件: isServe={isServe} id={swingEventId}");
+
+        var w = new FastBufferWriter(32, Unity.Collections.Allocator.Temp);
+        w.WriteValueSafe(MsgSwing);
+        w.WriteValueSafe((byte)(isServe ? 1 : 0));
+        w.WriteValueSafe(swingEventId);
+
+        Debug.Log($"[BS] swing event sent: isServe={isServe} id={swingEventId}");
         if (NetworkManager.Singleton.IsServer)
-            Bcast(msg);
+            Bcast(w, NetworkDelivery.ReliableSequenced);
         else
-            SendToServer(msg);
+            SendToServer(w, NetworkDelivery.ReliableSequenced);
+
+        w.Dispose();
     }
 
-    // 暂停同步（主机→客户端）
     public void SendPauseCommand(string cmd)
     {
         if (!NetworkManager.Singleton.IsServer) return;
-        string msg = $"M|{cmd}";
-        Bcast(msg);
-        Debug.Log($"[BS] 暂停命令广播: {cmd}");
+
+        var w = new FastBufferWriter(64, Unity.Collections.Allocator.Temp);
+        w.WriteValueSafe(MsgPause);
+        w.WriteValueSafe(cmd);
+        Bcast(w, NetworkDelivery.ReliableSequenced);
+        w.Dispose();
+
+        Debug.Log($"[BS] pause command broadcast: {cmd}");
     }
 
     void HandlePauseCommand(string cmd)
@@ -301,32 +490,46 @@ public class NetworkBattleSync : MonoBehaviour
 
     public void SyncScore(int left, int right, string server)
     {
-        string msg = $"S|{left}|{right}|{server}";
-        if (NetworkManager.Singleton.IsServer)
+        if (!NetworkManager.Singleton.IsServer)
         {
-            Debug.Log($"[BS] S消息广播: {left}-{right} server={server}");
-            Bcast(msg);
+            Debug.Log($"[BS] client score send ignored: {left}-{right}");
+            return;
         }
-        else
-        {
-            Debug.Log($"[BS] S消息客户端发送(会被忽略): {left}-{right}");
-        }
-    }
 
-    void SendToServer(string msg)
-    {
-        var w = new FastBufferWriter(256, Unity.Collections.Allocator.Temp);
-        w.WriteValueSafe(msg);
-        NetworkManager.Singleton.CustomMessagingManager.SendNamedMessage("BS", NetworkManager.ServerClientId, w);
+        var sc = FindObjectOfType<Shuttlecock>();
+        Vector2 landingPos = sc != null ? sc.transform.position : Vector2.zero;
+
+        var w = new FastBufferWriter(64, Unity.Collections.Allocator.Temp);
+        w.WriteValueSafe(MsgScore);
+        w.WriteValueSafe(left);
+        w.WriteValueSafe(right);
+        w.WriteValueSafe(EncodeServer(server));
+        w.WriteValueSafe(landingPos);
+        w.WriteValueSafe(NetworkTime);
+        Bcast(w, NetworkDelivery.ReliableSequenced);
         w.Dispose();
+
+        Debug.Log($"[BS] score broadcast: {left}-{right} server={server} landing={landingPos}");
     }
 
-    void Bcast(string msg)
+    void SendToServer(FastBufferWriter writer, NetworkDelivery delivery)
     {
-        var w = new FastBufferWriter(256, Unity.Collections.Allocator.Temp);
-        w.WriteValueSafe(msg);
+        NetworkManager.Singleton.CustomMessagingManager.SendNamedMessage("BS", NetworkManager.ServerClientId, writer, delivery);
+    }
+
+    void Bcast(FastBufferWriter writer, NetworkDelivery delivery)
+    {
         foreach (var id in NetworkManager.Singleton.ConnectedClientsIds)
-            NetworkManager.Singleton.CustomMessagingManager.SendNamedMessage("BS", id, w);
-        w.Dispose();
+            NetworkManager.Singleton.CustomMessagingManager.SendNamedMessage("BS", id, writer, delivery);
+    }
+
+    static byte EncodeServer(string server)
+    {
+        return server == "Right" ? ServerRight : ServerLeft;
+    }
+
+    static string DecodeServer(byte server)
+    {
+        return server == ServerRight ? "Right" : "Left";
     }
 }

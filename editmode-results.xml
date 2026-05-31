@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<test-run id="2" testcasecount="2" result="Passed" total="2" passed="2" failed="0" inconclusive="0" skipped="0" asserts="0" engine-version="3.5.0.0" clr-version="4.0.30319.42000" start-time="2026-05-31 04:19:04Z" end-time="2026-05-31 04:19:04Z" duration="0.0259413">
+  <test-suite type="TestSuite" id="1010" name="火柴人打羽毛球2" fullname="火柴人打羽毛球2" runstate="Runnable" testcasecount="2" result="Passed" start-time="2026-05-31 04:19:04Z" end-time="2026-05-31 04:19:04Z" duration="0.025941" total="2" passed="2" failed="0" inconclusive="0" skipped="0" asserts="0">
+    <properties />
+    <test-suite type="Assembly" id="1014" name="EditModeTests.dll" fullname="C:/Users/Administrator/iphone_game/Library/ScriptAssemblies/EditModeTests.dll" runstate="Runnable" testcasecount="2" result="Passed" start-time="2026-05-31 04:19:04Z" end-time="2026-05-31 04:19:04Z" duration="0.018067" total="2" passed="2" failed="0" inconclusive="0" skipped="0" asserts="0">
+      <properties>
+        <property name="_PID" value="26968" />
+        <property name="_APPDOMAIN" value="Unity Child Domain" />
+        <property name="platform" value="EditMode" />
+      </properties>
+      <test-suite type="TestFixture" id="1011" name="NetworkSnapshotBufferTests" fullname="NetworkSnapshotBufferTests" classname="NetworkSnapshotBufferTests" runstate="Runnable" testcasecount="2" result="Passed" start-time="2026-05-31 04:19:04Z" end-time="2026-05-31 04:19:04Z" duration="0.017106" total="2" passed="2" failed="0" inconclusive="0" skipped="0" asserts="0">
+        <properties />
+        <test-case id="1013" name="Add_DropsOutOfOrderSnapshots" fullname="NetworkSnapshotBufferTests.Add_DropsOutOfOrderSnapshots" methodname="Add_DropsOutOfOrderSnapshots" classname="NetworkSnapshotBufferTests" runstate="Runnable" seed="1035323474" result="Passed" start-time="2026-05-31 04:19:04Z" end-time="2026-05-31 04:19:04Z" duration="0.008212" asserts="0">
+          <properties />
+        </test-case>
+        <test-case id="1012" name="TrySample_InterpolatesPositionsAtRenderTime" fullname="NetworkSnapshotBufferTests.TrySample_InterpolatesPositionsAtRenderTime" methodname="TrySample_InterpolatesPositionsAtRenderTime" classname="NetworkSnapshotBufferTests" runstate="Runnable" seed="2075809581" result="Passed" start-time="2026-05-31 04:19:04Z" end-time="2026-05-31 04:19:04Z" duration="0.000867" asserts="0">
+          <properties />
+        </test-case>
+      </test-suite>
+    </test-suite>
+  </test-suite>
+</test-run>

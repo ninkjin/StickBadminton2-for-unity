@@ -29,11 +29,45 @@ public class GameManager : MonoBehaviour
 
     void Start()
     {
-        Application.targetFrameRate = 60;
+        Application.targetFrameRate = 90;
 
         if (shuttlecock != null)
         {
             shuttlecock.OnLanded += OnShuttlecockLanded;
+        }
+
+        // 根据摄像机可视范围动态设移动边界
+        float camHalfW = Camera.main.orthographicSize * Camera.main.aspect;
+        float camHalfH = Camera.main.orthographicSize;
+        float margin = 0.5f;
+        if (player != null)
+        {
+            player.moveMinX = -camHalfW + margin;
+            player.moveMaxX = -margin;
+        }
+        if (opponent != null)
+        {
+            opponent.moveMaxX = camHalfW - margin;
+            opponent.moveMinX = margin;
+        }
+
+        // 羽毛球墙壁边界匹配摄像机
+        if (shuttlecock != null)
+        {
+            shuttlecock.wallLeftX = -camHalfW;
+            shuttlecock.wallRightX = camHalfW;
+        }
+
+        // 背景图宽高分别填满摄像机（非等比拉伸，和设计时一样）
+        var bg = GameObject.Find("BattleBackground");
+        if (bg != null)
+        {
+            var bgSr = bg.GetComponent<SpriteRenderer>();
+            if (bgSr != null && bgSr.sprite != null)
+            {
+                Vector2 bgSize = bgSr.sprite.bounds.size;
+                bg.transform.localScale = new Vector3(camHalfW * 2f / bgSize.x, camHalfH * 2f / bgSize.y, 1f);
+            }
         }
 
         bool isNetwork = MultiplayerManager.Instance != null && MultiplayerManager.Instance.IsConnected();

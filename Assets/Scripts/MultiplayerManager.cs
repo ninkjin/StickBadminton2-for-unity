@@ -10,6 +10,7 @@ public class MultiplayerManager : MonoBehaviour
 {
     public static MultiplayerManager Instance { get; private set; }
     public string statusText = "未连接";
+    public string discoveredIP = "";
 
     private NetworkManager networkManager;
     private Coroutine connectTimeoutRoutine;
@@ -36,8 +37,9 @@ public class MultiplayerManager : MonoBehaviour
 
         networkManager.OnServerStarted += () =>
         {
-            statusText = "房间已创建，等待对手加入...";
-            Debug.Log("[MP] Host 启动成功！");
+            string myIP = GetLocalIP();
+            statusText = $"本机IP: {myIP}\n等待对手加入...";
+            Debug.Log($"[MP] Host 启动成功！本机IP: {myIP}");
             SpawnSyncObject();
             StartHostBroadcast();
         };
@@ -119,7 +121,13 @@ public class MultiplayerManager : MonoBehaviour
 
         var transport = GetComponent<UnityTransport>();
         transport.ConnectionData.Address = "0.0.0.0";
+        transport.ConnectionData.ServerListenAddress = "0.0.0.0";
         transport.ConnectionData.Port = 7777;
+
+#if UNITY_EDITOR
+        transport.SetDebugSimulatorParameters(20, 10, 0);
+        Debug.Log("[MP] Editor WiFi模拟已启用: 延迟20ms 抖动10ms 丢包0%");
+#endif
 
         statusText = "正在创建房间...";
         Debug.Log("[MP] 调用 StartHost...");
@@ -130,18 +138,24 @@ public class MultiplayerManager : MonoBehaviour
     {
         if (networkManager.IsListening) return;
 
-        if (string.IsNullOrEmpty(ip))
+        string targetIP = ip ?? discoveredIP;
+        if (string.IsNullOrEmpty(targetIP))
         {
             statusText = "请输入主机IP地址";
             return;
         }
 
         var transport = GetComponent<UnityTransport>();
-        transport.ConnectionData.Address = ip;
+        transport.ConnectionData.Address = targetIP;
         transport.ConnectionData.Port = 7777;
 
-        statusText = "正在加入 " + ip + "...";
-        Debug.Log("[MP] 尝试连接: " + ip);
+#if UNITY_EDITOR
+        transport.SetDebugSimulatorParameters(20, 10, 0);
+        Debug.Log("[MP] Editor WiFi模拟已启用: 延迟20ms 抖动10ms 丢包0%");
+#endif
+
+        statusText = "正在加入 " + targetIP + "...";
+        Debug.Log("[MP] 尝试连接: " + targetIP);
         networkManager.StartClient();
         connectTimeoutRoutine = StartCoroutine(ConnectTimeout());
     }
@@ -156,6 +170,47 @@ public class MultiplayerManager : MonoBehaviour
             networkManager.Shutdown();
         }
         connectTimeoutRoutine = null;
+    }
+
+    string GetLocalIP()
+    {
+        try
+        {
+            var ifaces = System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces();
+            foreach (var iface in ifaces)
+            {
+                string name = iface.Name.ToLower();
+                if (name.Contains("vmware") || name.Contains("loopback") || name.Contains("tunnel")
+                    || name.Contains("hyper-v") || name.Contains("virtual"))
+                    continue;
+                if (iface.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up)
+                    continue;
+                foreach (var addr in iface.GetIPProperties().UnicastAddresses)
+                {
+                    if (addr.Address.AddressFamily == AddressFamily.InterNetwork)
+                    {
+                        string ip = addr.Address.ToString();
+                        if (!ip.StartsWith("127."))
+                            return ip;
+                    }
+                }
+            }
+        }
+        catch { }
+        try
+        {
+            var host = Dns.GetHostEntry(Dns.GetHostName());
+            foreach (var addr in host.AddressList)
+            {
+                if (addr.AddressFamily == AddressFamily.InterNetwork)
+                {
+                    string ip = addr.ToString();
+                    if (!ip.StartsWith("127.")) return ip;
+                }
+            }
+        }
+        catch { }
+        return "127.0.0.1";
     }
 
     // ===== UDP 自动发现 =====

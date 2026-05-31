@@ -806,6 +806,9 @@ public class BattleCharacter : MonoBehaviour
     }
 
     private bool remoteWasSwing;
+    private bool wasBirdieInPlay;
+    private Vector2 charSmoothVel;
+    private Vector2 birdieSmoothVel;
 
     void UpdateRemoteVisuals()
     {
@@ -822,25 +825,29 @@ public class BattleCharacter : MonoBehaviour
     {
         var sync = NetworkBattleSync.Instance;
         if (sync == null || !sync.Received) return;
-        transform.position = Vector2.Lerp(transform.position, sync.RemotePos, Time.deltaTime * 20f);
+
+        // 人物：SmoothDamp，60Hz更新+0.06s平滑
+        transform.position = Vector2.SmoothDamp(
+            transform.position, sync.RemotePos, ref charSmoothVel, 0.06f);
+
         facing = sync.RemoteFacing;
+        if ((sync.RemoteSwing || sync.RemoteServe) && !remoteWasSwing)
+            SwingMe();
+        remoteWasSwing = sync.RemoteSwing || sync.RemoteServe;
+        isWalking = sync.RemoteWalk;
+
+        // 球：本地物理主导，网络用极慢SmoothDamp飘过去校正（不被察觉）
+        if (shuttlecock != null && sync.BirdieInPlay)
+            shuttlecock.transform.position = Vector2.SmoothDamp(
+                shuttlecock.transform.position, sync.BirdiePos, ref birdieSmoothVel, 0.3f);
+        if (shuttlecock != null && !sync.BirdieInPlay && serving)
+            shuttlecock.transform.position = sync.BirdiePos;
+        wasBirdieInPlay = sync.BirdieInPlay;
+
         Vector3 scale = transform.localScale;
         scale.x = Mathf.Abs(scale.x) * facing;
         transform.localScale = scale;
         UpdateSwingOverlayFlip();
-
-        if ((sync.RemoteSwing || sync.RemoteServe) && !remoteWasSwing)
-            SwingMe();
-        remoteWasSwing = sync.RemoteSwing || sync.RemoteServe;
-
-        isWalking = sync.RemoteWalk;
-
-        // 球在飞行中同步位置
-        if (shuttlecock != null && sync.BirdieInPlay)
-            shuttlecock.transform.position = sync.BirdiePos;
-        // 发球阶段也同步（球跟着发球者）
-        if (shuttlecock != null && !sync.BirdieInPlay && serving)
-            shuttlecock.transform.position = sync.BirdiePos;
     }
 
     void OnDrawGizmosSelected()

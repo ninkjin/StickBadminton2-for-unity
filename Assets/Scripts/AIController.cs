@@ -33,8 +33,8 @@ public class AIController : MonoBehaviour
     public float serveRecoveryFPS = 30f;
     public Sprite idleOverlaySprite;
     public float swingFPS = 40f;
-    public int hitStartFrame = 8;
-    public int hitEndFrame = 28;
+    public int hitStartFrame = 0;
+    public int hitEndFrame = 26;
     public int serveHitFrame = 10;
 
     [Header("SwingOverlay 位置偏移")]
@@ -333,40 +333,48 @@ public class AIController : MonoBehaviour
         if (!serving)
             aiServeStarted = false;
 
-        // --- 移动策略 ---
+        // --- 移动策略：混合落点预测 + 实时追球 ---
         float targetX = aiIdlePositionX;
 
         if (birdInPlay)
         {
-            if (aiWasHit && Time.time - aiSwingCommitted < 0.8f)
+            if (aiWasHit && Time.time - aiSwingCommitted < 0.5f)
             {
+                // 刚击球后快速回中
                 targetX = aiIdlePositionX;
             }
-            else if (Time.time - aiPlayerHitTime > aiReactDelay * (1f - aiSkillLevel * 0.5f))
+            else if (Time.time - aiPlayerHitTime > aiReactDelay * (1f - aiSkillLevel * 0.3f))
             {
-                // 反应延迟过后 → 缓存目标位置，并持续跟踪落点变化（弹墙/天花板后调整）
-                float newTarget = Mathf.Clamp(shuttlecock.estimatedLandingX + aiCachedError, moveMinX + 0.5f, moveMaxX - 0.5f);
-                if (aiTargetX < -99f || Mathf.Abs(newTarget - aiTargetX) > 1.5f)
+                // 优先追球当前位置（更直接），远处时切换落点预测
+                float distToBirdie = Mathf.Abs(birdPos.x - myX);
+                if (distToBirdie < aiReactDistance * 1.2f)
                 {
-                    aiTargetX = newTarget;
+                    targetX = Mathf.Clamp(birdPos.x, moveMinX + 0.3f, moveMaxX - 0.3f);
                 }
-                targetX = aiTargetX;
+                else
+                {
+                    float newTarget = Mathf.Clamp(shuttlecock.estimatedLandingX + aiCachedError,
+                        moveMinX + 0.5f, moveMaxX - 0.5f);
+                    if (aiTargetX < -99f || Mathf.Abs(newTarget - aiTargetX) > 1f)
+                        aiTargetX = newTarget;
+                    targetX = aiTargetX;
+                }
             }
         }
         else
         {
-            aiTargetX = -999f; // 重置，下次重新缓存
+            aiTargetX = -999f;
         }
 
-        // 平滑移动（不要瞬间跳变）
+        // 平滑移动
         float diff = targetX - myX;
-        float moveThreshold = aiWasHit ? 0.5f : 0.2f;
+        float moveThreshold = aiWasHit ? 0.3f : 0.15f;
         if (Mathf.Abs(diff) > moveThreshold)
         {
             float spd = moveSpeed * moveModifier;
-            if (aiWasHit) spd *= 0.6f;
-            // 目标远时加速（追靠墙球）
-            if (Mathf.Abs(diff) > 2f) spd *= 1.4f;
+            if (aiWasHit) spd *= 0.85f;
+            if (Mathf.Abs(diff) > 2.5f) spd *= 1.3f;
+            if (Mathf.Abs(diff) > 4f) spd *= 1.3f;
             float moveX = Mathf.Sign(diff) * spd * Time.deltaTime;
             moveX = Mathf.Clamp(moveX, -Mathf.Abs(diff), Mathf.Abs(diff));
 
@@ -386,13 +394,12 @@ public class AIController : MonoBehaviour
             isWalking = false;
         }
 
-        // --- 跳跃 ---
-        if (birdInPlay && canSwing && state != CharState.Jumping
-            && !aiWasHit) // 刚打完球不跳（避免连跳）
+        // --- 跳跃：球高+近+朝我飞来才跳 ---
+        if (birdInPlay && canSwing && state != CharState.Jumping && !aiWasHit)
         {
-            bool ballHigh = birdPos.y > myY + hitZoneOffset.y;
+            bool ballHigh = birdPos.y > myY + hitZoneOffset.y + 1f;
             bool ballClose = Mathf.Abs(birdPos.x - myX) < aiReactDistance * 1.5f;
-            bool ballApproaching = (facing == -1 && shuttlecock.dx < -1f) || (facing == 1 && shuttlecock.dx > 1f);
+            bool ballApproaching = (facing == -1 && shuttlecock.dx < -0.5f) || (facing == 1 && shuttlecock.dx > 0.5f);
 
             if (ballHigh && ballClose && ballApproaching)
             {
@@ -411,21 +418,20 @@ public class AIController : MonoBehaviour
             }
         }
 
-        // --- 挥拍 ---
+        // --- 挥拍：更大反应距离 + 更短冷却 ---
         if (canSwing && birdInPlay
-            && Time.time - aiLastSwingTime > aiSwingCooldown
-            && !aiWasHit) // 刚打完球不能马上再挥（防止连挥bug）
+            && Time.time - aiLastSwingTime > aiSwingCooldown * 0.6f
+            && !aiWasHit)
         {
-            // 球在反弹中且很低 → 不挥（防止地弹球无限连挥）
             bool ballBouncing = birdPos.y < myY - 1f && shuttlecock.dy > -3f;
             if (ballBouncing) goto skipSwing;
 
             float dist = Vector2.Distance(
                 new Vector2(birdPos.x, birdPos.y),
                 new Vector2(myX, myY + hitZoneOffset.y));
-            bool ballInFront = (facing == -1 && birdPos.x < myX + 0.5f)
-                            || (facing == 1 && birdPos.x > myX - 0.5f);
-            float effectiveDist = ballInFront ? aiReactDistance : aiReactDistance * 0.5f;
+            bool ballInFront = (facing == -1 && birdPos.x < myX + 0.8f)
+                            || (facing == 1 && birdPos.x > myX - 0.8f);
+            float effectiveDist = ballInFront ? aiReactDistance * 1.3f : aiReactDistance * 0.7f;
 
             if (dist < effectiveDist)
             {
@@ -999,6 +1005,7 @@ public class AIController : MonoBehaviour
     }
 
     private bool remoteWasSwing;
+    private Vector2 charSmoothVel;
 
     void UpdateRemoteVisuals()
     {
@@ -1015,21 +1022,23 @@ public class AIController : MonoBehaviour
     {
         var sync = NetworkBattleSync.Instance;
         if (sync == null || !sync.Received) return;
-        transform.position = Vector2.Lerp(transform.position, sync.RemotePos, Time.deltaTime * 20f);
+
+        transform.position = Vector2.SmoothDamp(
+            transform.position, sync.RemotePos, ref charSmoothVel, 0.06f);
+
         facing = sync.RemoteFacing;
+        if ((sync.RemoteSwing || sync.RemoteServe) && !remoteWasSwing)
+            SwingMe();
+        remoteWasSwing = sync.RemoteSwing || sync.RemoteServe;
+        isWalking = sync.RemoteWalk;
+
+        if (shuttlecock != null && !sync.BirdieInPlay && serving)
+            shuttlecock.transform.position = sync.BirdiePos;
+
         Vector3 scale = transform.localScale;
         scale.x = Mathf.Abs(scale.x) * facing;
         transform.localScale = scale;
         UpdateSwingOverlayFlip();
-
-        if ((sync.RemoteSwing || sync.RemoteServe) && !remoteWasSwing)
-            SwingMe();
-        remoteWasSwing = sync.RemoteSwing || sync.RemoteServe;
-
-        isWalking = sync.RemoteWalk;
-        // 发球阶段同步球位置（球跟着发球者），飞行阶段不覆盖主机物理
-        if (shuttlecock != null && !sync.BirdieInPlay && serving)
-            shuttlecock.transform.position = sync.BirdiePos;
     }
 
     void OnDrawGizmosSelected()
